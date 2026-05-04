@@ -1,0 +1,269 @@
+---
+title: "Skill spec: SKILL.md format and authoring rules"
+description: "Complete reference for the SKILL.md format: frontmatter template, body structure, voice rules, RIGHT/WRONG patterns, and mandatory author rules."
+---
+
+This page is the authoritative reference for every `SKILL.md` in the compose-performance-skills repository. It is a direct translation of `docs/SPEC.md` into a browsable format. When the source spec and this page conflict, the source spec wins — open a PR to sync them. Every contributor **MUST** read this page before authoring a new skill or modifying an existing one.
+
+## Frontmatter template
+
+Copy this block exactly into the top of every `SKILL.md`. Do not add extra keys, rename keys, or change the order.
+
+```yaml
+---
+name: <slug-matching-folder>
+description: >
+  <trigger paragraph — 3rd person, 1-4 sentences, ≤1024 chars.
+  Leads with "Use this skill to …" or a verb; ends with a
+  "if the user mentions X, Y, Z" hammer. Must state BOTH
+  what + when.>
+license: Apache-2.0. See LICENSE for complete terms.
+metadata:
+  author: Jaewoong Eum (skydoves)
+  keywords:
+    - jetpack-compose
+    - performance
+    - <3-6 more specific keywords>
+---
+```
+
+### Frontmatter field rules
+
+| Field | Rule |
+|---|---|
+| `name` | **MUST** match the folder slug exactly — same case, same hyphens. |
+| `description` | **MUST** be ≤1024 characters. Third person throughout. No `I`, `we`, `you`. Include ≥3 trigger vocabulary variants (`jank`, `dropped frames`, API names). |
+| `license` | Copy verbatim: `Apache-2.0. See LICENSE for complete terms.` |
+| `keywords` | **MUST** have ≥4 entries. Mix symptoms (`jank`, `slow-scroll`) with API names (`modifier-node`, `baseline-profiles`). |
+
+<Warning>
+  Skill names **MUST NOT** contain the reserved words `anthropic` or `claude`.
+  PRs that violate this rule are rejected automatically.
+</Warning>
+
+### Description quality checklist
+
+Before saving the frontmatter, verify each item:
+
+- Starts with a verb or "Use this skill to …"
+- Names ≥3 trigger vocabulary variants the user would naturally say
+- States the symptom or problem the skill addresses
+- Closes with a "if the user mentions X, use this skill" sentence
+- Under 1024 characters; reads in one breath
+- No time-sensitive wording (`as of March 2026`, `recently`)
+- Third person throughout
+
+## Body structure
+
+Target **≤500 lines**. Content that exceeds this limit moves into `references/<topic>.md` files. Use the following section order without deviation:
+
+```markdown
+# <Title> — <one-line tagline>
+
+<2-3 sentence orientation: what this skill fixes, who should
+care, approximate impact>
+
+## When to use this skill
+
+<3-5 bullets of concrete triggers. Mirror frontmatter vocabulary.>
+
+## When NOT to use this skill
+
+<1-3 bullets where this skill does NOT apply — cross-reference
+sibling skills by relative path.>
+
+## Prerequisites
+
+<Bulleted. Compose version min, build flags, sibling skills
+to run first.>
+
+## Workflow
+
+<Numbered steps or checkbox list. Every step has a concrete
+command or snippet, a short rationale, and a RIGHT/WRONG pair
+where relevant.>
+
+## Patterns
+
+### Pattern: <name>
+
+<problem → fix as RIGHT/WRONG paired snippets>
+
+## Mandatory rules
+
+- **MUST** …
+- **MUST NOT** …
+- **PREFERRED:** …
+
+## Verification
+
+<Checkbox list of commands/checks that prove the skill was
+applied correctly.>
+
+## References
+
+<Inline links to authoritative sources.>
+```
+
+<Note>
+  Shorter skills can collapse `Workflow` into `Patterns`. Index-style skills
+  can omit `Workflow` entirely. The section order for the sections that do
+  appear must still match the template.
+</Note>
+
+## Voice and tone rules
+
+Skills are consumed by an AI agent at inference time, not read by human developers. Write for precision of instruction, not for readability.
+
+| Context | Rule |
+|---|---|
+| Instructions to the agent | **Imperative second person**: `Run ./gradlew assembleRelease`, `Replace List<Foo> with ImmutableList<Foo>`. |
+| References to the developer | **Third person**: `the developer`, `the user` — never `you`. |
+| Hard rules | `MUST`, `MUST NOT`, `DO NOT`, `PREFERRED` in **bold caps**. |
+| Code patterns | Paired `WRONG` / `RIGHT` blocks with a one-line `WRONG because:` rationale. |
+
+Forbidden in all skill content:
+
+- Emojis
+- Filler phrases (`Let's dive in!`, `Great question`)
+- Apologies or hedges
+- First person (`I`, `we`, `let me`, `let's`)
+- XML or HTML tags
+- Time-sensitive phrasing (`as of`, `recently`, `latest release`)
+
+## Skydoves editorial directives
+
+These six directives represent skydoves' own performance hot takes. Surface the applicable ones whenever a skill's content touches the topic.
+
+<AccordionGroup>
+  <Accordion title="1. Don't chase 100% skippability">
+    Skippability is a diagnostic tool, not a KPI. A composable that is not
+    skippable is not automatically a problem. Measure frame times and
+    recomposition counts before treating skippability as the goal.
+  </Accordion>
+  <Accordion title="2. Stability config is a contract, not a magic spell">
+    Marking a mutable type as stable tells the Compose compiler to trust you.
+    If the type mutates without notifying Compose, recompositions are silently
+    missed. Use stability configuration only when you can guarantee the
+    contract holds.
+  </Accordion>
+  <Accordion title="3. Inline composables are not restartable or skippable">
+    `Row`, `Column`, and `Box` are inline composables. Wrapping content in them
+    changes the recomposition scope. A lambda inside an inline composable
+    cannot be independently skipped — the entire inline call restarts.
+  </Accordion>
+  <Accordion title="4. Flow parameters are unstable">
+    **MUST NOT** pass `Flow` or `StateFlow` directly as composable parameters.
+    `Flow` is not a stable type; passing it forces the composable to be
+    treated as unstable and recompose on every caller recomposition. Collect
+    flows in a `ViewModel` and expose `State` or use
+    `collectAsStateWithLifecycle` at the call site.
+  </Accordion>
+  <Accordion title="5. Always measure in release + R8 + real device">
+    Debug builds produce misleading performance data because of Live Literals,
+    interpreted mode, and disabled R8 optimizations. Baseline Profiles, for
+    example, have no effect in debug builds. Every Verification checklist
+    **MUST** specify release build + R8 + physical device.
+  </Accordion>
+  <Accordion title="6. Use compose-stable-marker for pure-Kotlin modules">
+    Pure-Kotlin or data modules that need stability annotations do not need to
+    pull in the full `compose-runtime` dependency. Use `compose-stable-marker`
+    (or the newer official `compose-runtime-annotation`) to annotate types
+    without introducing a Compose runtime dependency to non-UI modules.
+  </Accordion>
+</AccordionGroup>
+
+## RIGHT/WRONG snippet quality bar
+
+Every skill that teaches a code-level fix **MUST** include at least one RIGHT/WRONG paired snippet. The following rules apply to every pair.
+
+**WRONG snippet rules:**
+- Label the block with `// WRONG` on the first line.
+- Follow immediately with `// WRONG because: <one-line rationale>`.
+- The rationale must name the specific mechanism that makes the code wrong.
+
+**RIGHT snippet rules:**
+- Label the block with `// RIGHT` on the first line.
+- The snippet **MUST** compile — no `...` ellipses in the critical lines.
+- No additional comment is required, but a short clarification is allowed.
+
+### Example from the spec
+
+```kotlin
+// WRONG
+Box(Modifier.offset(x = animatedX.value.dp))
+// WRONG because: reading .value in Composition phase invalidates
+// the whole subtree each frame.
+```
+
+```kotlin
+// RIGHT
+Box(Modifier.offset { IntOffset(animatedX.value.toInt(), 0) })
+```
+
+In the WRONG example, `.value` is read during the Composition phase, which means the entire subtree invalidates every animation frame. In the RIGHT example, the lambda defers the `.value` read to the Layout phase, so only the offset is recalculated per frame — the subtree does not recompose.
+
+## Cross-reference rules
+
+When a skill body refers to another skill, use a relative Markdown link from the current `SKILL.md` to the target `SKILL.md`:
+
+```markdown
+See `../recomposition/deferring-state-reads/SKILL.md` for
+the phase-deferral details.
+```
+
+<Warning>
+  **MUST NOT** link sibling skills by URL. **MUST NOT** assume a shared index
+  loads them — the agent may jump into the skill tree at any node. Relative
+  links are the only safe cross-reference format.
+</Warning>
+
+## Mandatory rules for skill authors
+
+These rules are enforced at review. A PR that violates any of them is sent back.
+
+- **MUST** keep the body ≤500 lines. Split overflow into `references/`.
+- **MUST** include at least one RIGHT/WRONG snippet pair in any skill that teaches a code-level fix.
+- **MUST** end with a Verification checklist.
+- **MUST** cite authoritative URLs: Android Developers, Compose compiler source, Ben Trengrove, Chris Banes, skydoves blog.
+- **MUST NOT** use first person (`I`, `we`, `let me`) anywhere except `metadata.author`.
+- **MUST NOT** recommend `composed { }` for new custom modifiers — always `Modifier.Node`.
+- **MUST NOT** claim a feature exists without a version or doc URL to back it.
+- **MUST NOT** duplicate content between skills — cross-reference instead.
+
+## Post-write checklist
+
+Run through every item before opening a pull request. This is the SPEC §9 self-check reproduced for reference.
+
+<AccordionGroup>
+  <Accordion title="Frontmatter">
+    - [ ] `name` matches the folder slug exactly
+    - [ ] `description` is ≤1024 characters
+    - [ ] `description` has no reserved words (`anthropic`, `claude`)
+    - [ ] `description` contains ≥3 trigger vocabulary variants
+    - [ ] `keywords` has ≥4 entries
+    - [ ] `license` line is present verbatim
+  </Accordion>
+  <Accordion title="Body">
+    - [ ] Body is ≤500 lines (`wc -l SKILL.md`)
+    - [ ] At least one RIGHT/WRONG pair for code-level skills
+    - [ ] Verification checklist is present
+    - [ ] At least 3 authoritative reference URLs
+    - [ ] Applicable skydoves hot-take from §5 is surfaced
+    - [ ] `MUST` / `MUST NOT` directives are in **bold caps**
+    - [ ] No emojis, no first person, no time-sensitive phrasing
+  </Accordion>
+</AccordionGroup>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Authoring new skills" href="/contributing/authoring-skills" icon="pencil">
+    Step-by-step contribution workflow: directory setup, slug naming, writing
+    the body, updating INDEX.md, and passing the self-check.
+  </Card>
+  <Card title="Introduction" href="/introduction" icon="book-open">
+    Overview of the compose-performance-skills library and its design
+    philosophy.
+  </Card>
+</CardGroup>

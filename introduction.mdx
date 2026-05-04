@@ -1,0 +1,74 @@
+---
+title: "Compose Performance Skills: What and Why It Exists"
+description: "A library of 26 Agent Skills that give AI coding agents the operational knowledge to diagnose and fix Jetpack Compose performance issues end to end."
+keywords: ["jetpack compose", "performance", "agent skills", "android", "skill.md", "recomposition", "stability"]
+---
+
+Compose Performance Skills is a curated library of Agent Skills for Jetpack Compose performance work. Where the official [android/skills](https://github.com/android/skills) catalog covers Android development broadly, this library goes narrow and deep on a single axis: Compose performance. It ships 26 skills across 9 categories — stability, recomposition, lazy lists, custom modifiers, side effects, measurement, build configuration, hot reload, and end-to-end auditing. Every skill is grounded in primary sources: Android Developers documentation, the Compose compiler, and five skydoves OSS libraries that form the technical foundation of the content.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install the skills into Claude Code, Android Studio Agent, or any compatible agent runtime in minutes.
+  </Card>
+  <Card title="How skills work" icon="book-open" href="/how-skills-work">
+    Understand the SKILL.md format, frontmatter triggers, and how agents load and chain skills automatically.
+  </Card>
+  <Card title="Performance loop" icon="arrows-spin" href="/performance-loop/overview">
+    Follow the Measure → Diagnose → Fix → Verify loop that every skill in the library is aligned to.
+  </Card>
+  <Card title="Skills reference" icon="list" href="/skills/stability/diagnosing-compose-stability">
+    Browse all 26 skills organized by category: Stability, Recomposition, Lists, Modifiers, and more.
+  </Card>
+</CardGroup>
+
+## What are Agent Skills
+
+An Agent Skill is a single Markdown file (`SKILL.md`) plus optional `references/` material that teaches an AI agent how to perform one focused task. Skills declare trigger vocabulary in YAML frontmatter. When you describe a symptom in a prompt, the agent reads that frontmatter, decides whether the skill matches the task, and then follows the numbered workflow inside `SKILL.md` step by step.
+
+A skill is not documentation for humans. It is operational instructions for an LLM. That changes the writing voice: terse, imperative, RIGHT and WRONG snippet pairs, `MUST` and `MUST NOT` directives in bold caps, and a Verification checklist that proves the work was done. Prose is kept short; code samples carry the load.
+
+The skills in this library follow the open Agent Skills standard at [agentskills.io](https://agentskills.io) — the same `SKILL.md` format used by Anthropic's Skills API, Android Studio Agent mode, and Gemini.
+
+## Who this library is for
+
+This library targets Android developers who use AI coding agents (Claude Code, Android Studio Agent mode, Gemini, or any compatible runtime) to work on Jetpack Compose UI. You do not need to read the skills yourself. Install them once, describe a Compose performance symptom in a prompt, and the agent loads the right skill automatically.
+
+<Note>
+  The library was iterated against Claude Code, where `SKILL.md` files load directly. Compatibility with Android Studio Agent mode and Gemini is expected but has not been independently end-to-end verified by the author. Reports of working or broken integration are welcome at the [issue tracker](https://github.com/skydoves/compose-performance-skills/issues).
+</Note>
+
+## The 9 skill categories
+
+The 26 skills are organized into 9 categories that map to the phases and concerns of Compose performance work.
+
+| Category | What it covers |
+|---|---|
+| `stability/` | Read Compose Compiler reports, stabilize types, configure `stability_config.conf`, validate via `compose-stability-analyzer`, enforce stability in CI, and use the IDE analyzer plugin. 6 skills. |
+| `recomposition/` | Eliminate unnecessary recompositions by deferring state reads to layout or draw, applying `derivedStateOf` correctly, tracing recomposition with `@TraceRecomposition`, and avoiding `SubcomposeLayout` / `BoxWithConstraints` / `Scaffold` pitfalls. 5 skills. |
+| `lists/` | Make `LazyColumn` and `LazyVerticalGrid` smooth with stable keys, `contentType`, `LazyLayoutCacheWindow`, and pausable prefetch. 2 skills. |
+| `modifiers/` | Author and migrate custom modifiers: `Modifier.Node` over `composed { }`, `graphicsLayer { }` for animated reads, correct `.then()` ordering. 2 skills. |
+| `side-effects/` | Wire flows and effects safely with `collectAsStateWithLifecycle`, correct `LaunchedEffect` keys, and lambda memoization under strong skipping. 2 skills. |
+| `measurement/` | Establish baselines before fixing anything: Macrobenchmark, Baseline Profiles, frame timing, startup metrics, and release-mode invariants. 3 skills. |
+| `build/` | Get the toolchain right: R8 in full mode, strong skipping flag, CI-time stability validation. 1 skill. |
+| `audit/` | Orchestrator skill that sequences the other categories into an end-to-end performance audit — Measure to Diagnose to Fix to Verify. 1 skill. |
+| `hot-reload/` | Install Compose HotSwan, stay inside the supported change set, preserve state across reloads, and drive the loop from an AI agent over MCP. 4 skills. |
+
+## Editorial position
+
+Five non-negotiable positions are carried across every skill as `MUST` and `MUST NOT` directives so the agent treats them as hard constraints, not suggestions.
+
+1. **Skippability is a diagnostic, not a KPI.** Do not chase 100% skippable composables.
+2. **A stability config is a contract with the compiler.** Break the contract and you silently miss recompositions.
+3. **Inline composables (`Row`, `Column`, `Box`) are not restartable or skippable.** Wrapping them changes recomposition scoping.
+4. **`Flow` parameters are unstable.** Collect them in a `ViewModel` or with `collectAsStateWithLifecycle`. Do not pass them down the tree.
+5. **Always measure in release + R8 + a real device.** Debug builds lie.
+
+## The five skydoves OSS libraries
+
+The technical content of this library is seeded by five open source libraries maintained by [skydoves](https://github.com/skydoves). Skills cite them inline wherever their APIs are referenced.
+
+- [**compose-performance**](https://github.com/skydoves/compose-performance): The umbrella Compose performance hub.
+- [**compose-stability-inference**](https://github.com/skydoves/compose-stability-inference): The 12-phase stability inference algorithm and bitmask encoding.
+- [**compose-stability-analyzer**](https://github.com/skydoves/compose-stability-analyzer): `@TraceRecomposition`, `stabilityDump`, and the `stabilityCheck` Gradle plugin.
+- [**compose-stable-marker**](https://github.com/skydoves/compose-stable-marker): `@Stable`, `@Immutable`, and `@StableMarker` for pure Kotlin modules without pulling `compose-runtime`.
+- [**compose-effects**](https://github.com/skydoves/compose-effects): `RememberedEffect`, `ViewModelStoreScope`, and other side effect primitives.

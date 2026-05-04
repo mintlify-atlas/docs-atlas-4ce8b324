@@ -1,0 +1,338 @@
+---
+title: "Stabilizing Compose Types with the Three-Tier Strategy"
+description: "Fix unstable Compose parameters with structural rewrites, @Immutable/@Stable annotations, and stabilityConfigurationFiles — applied in the correct order."
+---
+
+Once [Diagnosing Compose Stability](/skills/stability/diagnosing-compose-stability) has named the unstable types, this skill fixes them. The strategy is a strict three-tier waterfall: (1) make the type **truly stable** by structural rewrite — no annotation needed; (2) annotate with `@Immutable` or `@Stable` when you own the source and the contract is honored; (3) use `stabilityConfigurationFiles` for third-party or Java types. Inverting this order is the most common stability mistake — annotations are a contract, not a shortcut.
+
+## When to use this skill
+
+- The compiler report shows one or more `unstable` parameters in `composables.txt` or `classes.txt`
+- You need to stabilize a domain class, a `List<Foo>` parameter, `java.time.LocalDateTime`, or a third-party type
+- You are deciding between `@Immutable` and `@Stable` and need to know which one to use
+- A `@TraceRecomposition` log shows recomposition happening because an argument is allocated fresh every recomposition
+
+## Prerequisites
+
+- Run [Diagnosing Compose Stability](/skills/stability/diagnosing-compose-stability) first — you need a concrete list of unstable types before applying fixes
+- Kotlin **2.0.0+** with `org.jetbrains.kotlin.plugin.compose` applied; Strong Skipping is on by default
+- For pure-Kotlin / data modules without `compose-runtime`: add `androidx.compose.runtime:runtime-annotation` (official) or `com.github.skydoves:compose-stable-marker` (legacy) to get `@Stable`/`@Immutable` without pulling in the full Compose runtime
+- For tier-3 fixes: Compose Compiler **1.5.5+** for `stabilityConfigurationFiles` (plural) DSL support
+
+## Workflow
+
+<Steps>
+  <Step title="Determine whether you own the source">
+    If you own the source, use tier 1 or tier 2. If the type lives in a third-party SDK, the Java stdlib, or a pre-compiled dependency you cannot modify, jump directly to tier 3.
+  </Step>
+
+  <Step title="Tier 1 — restructure to truly stable">
+    Can every property become a `val` of an already-stable type? If yes, make that change first. No annotation is needed and no contract is implied — the compiler infers stability automatically.
+
+    <Tabs>
+      <Tab title="Wrong">
+        ```kotlin
+        data class Snack(
+            var name: String,
+            val tags: Set<String>,
+        )
+        ```
+        `var name` is an observable that does not notify Compose. `Set<String>` is the standard library interface so its stability is `Unknown` — the data class is unstable on two axes.
+      </Tab>
+      <Tab title="Right">
+        ```kotlin
+        @Immutable
+        data class Snack(
+            val name: String,
+            val tags: ImmutableSet<String>,
+        )
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Replace collection parameters with immutable variants">
+    Replace `kotlin.collections.List`, `Set`, and `Map` with `kotlinx.collections.immutable.ImmutableList`, `ImmutableSet`, and `ImmutableMap`. Use `persistentListOf()`, `persistentSetOf()`, `persistentMapOf()`, or `.toImmutableList()` adapters at the producer side.
+
+    <Tabs>
+      <Tab title="Wrong">
+        ```kotlin
+        @Composable
+        fun ItemList(items: List<Item>) { /* ... */ }
+        ```
+        `kotlin.collections.List` is an interface. The compiler cannot prove every implementation is immutable, so the parameter is `unstable`.
+      </Tab>
+      <Tab title="Right">
+        ```kotlin
+        import kotlinx.collections.immutable.ImmutableList
+
+        @Composable
+        fun ItemList(items: ImmutableList<Item>) { /* ... */ }
+        ```
+
+        Producer side:
+
+        ```kotlin
+        val items: ImmutableList<Item> = repository.items().toImmutableList()
+        ```
+      </Tab>
+    </Tabs>
+
+    <Tip>
+      Prefer `kotlinx.collections.immutable` over whitelisting `kotlin.collections.*` in `stability_config.conf`. The type system enforces immutability; the config file relies on a contract you must uphold manually.
+    </Tip>
+  </Step>
+
+  <Step title="Add annotations for pure-Kotlin / data modules">
+    If the module does not depend on `compose-runtime`, add `androidx.compose.runtime:runtime-annotation` (official) or `com.github.skydoves:compose-stable-marker` (legacy). Both expose `@Stable`/`@Immutable` without pulling in the full runtime.
+
+    ```kotlin
+    // shared data module — build.gradle.kts
+    dependencies {
+        // Official, preferred:
+        compileOnly("androidx.compose.runtime:runtime-annotation:<version>")
+        // Or legacy skydoves:
+        // implementation("com.github.skydoves:compose-stable-marker:<version>")
+    }
+    ```
+  </Step>
+
+  <Step title="Tier 2 — choose @Immutable or @Stable">
+    If every property is `val` and every nested value is itself immutable with structural `equals`, use `@Immutable`. Otherwise — for types whose values can change but whose mutations are observed by Compose via `MutableState` — use `@Stable`.
+
+    ```kotlin
+    // RIGHT — @Immutable: every property val, every property type immutable
+    @Immutable
+    data class ThemeColors(
+        val primary: Color,
+        val onPrimary: Color,
+        val background: Color,
+    )
+
+    // RIGHT — @Stable: mutable but mutations notify Compose via Snapshot
+    @Stable
+    class CartState {
+        var total: Money by mutableStateOf(Money.ZERO)
+        val lines: SnapshotStateList<Line> = mutableStateListOf()
+    }
+    ```
+
+    <Note>
+      `@Immutable` is more aggressive than `@Stable`. When every constructor argument at a call site is a compile-time constant, the compiler performs **static expression promotion**: the instance is hoisted into a singleton and the parameter is marked `@static` in `composables.txt`. Most articles treat them as interchangeable — they are not.
+    </Note>
+  </Step>
+
+  <Step title="Tier 3 — third-party or Java types via stabilityConfigurationFiles">
+    Create `stability_config.conf` at the project root and wire it into the `composeCompiler { }` block. Use exact class names or wildcards.
+
+    ```kotlin
+    // build.gradle.kts
+    composeCompiler {
+        stabilityConfigurationFiles.add(
+            rootProject.layout.projectDirectory.file("stability_config.conf")
+        )
+    }
+    ```
+
+    ```text
+    # stability_config.conf — opt-in contract
+    java.time.LocalDateTime
+    java.time.LocalDate
+    java.time.Instant
+    java.time.ZonedDateTime
+    kotlin.collections.List
+    kotlin.collections.Set
+    kotlin.collections.Map
+    com.example.thirdparty.**
+    ```
+
+    <Warning>
+      The deprecated singular property `stabilityConfigurationFile = ...` still works but is deprecated. Use the plural `stabilityConfigurationFiles.add(...)` form shown above.
+    </Warning>
+  </Step>
+
+  <Step title="Escape hatch — StableHolder wrapper">
+    When tiers 1–3 don't fit, wrap the type in a `@Stable` holder. The holder's identity is stable, equality delegates to the item, and Compose can skip on it.
+
+    ```kotlin
+    @Stable
+    class StableHolder<T>(val item: T) {
+        override fun equals(other: Any?) = other is StableHolder<*> && other.item == item
+        override fun hashCode() = item?.hashCode() ?: 0
+    }
+    ```
+  </Step>
+
+  <Step title="Handle Flow parameters — collect upstream, never annotate">
+    `Flow<T>` parameters are unstable. Do not pass flows to composables. Collect them in a ViewModel with `collectAsStateWithLifecycle`.
+
+    <Tabs>
+      <Tab title="Wrong">
+        ```kotlin
+        @Composable
+        fun Feed(items: Flow<List<Item>>) { /* ... */ }
+        ```
+        `Flow` has no observable identity. The composable cannot skip on it, and a downstream `collectAsState` here detaches from the lifecycle.
+      </Tab>
+      <Tab title="Right">
+        ```kotlin
+        @Composable
+        fun FeedRoute(viewModel: FeedViewModel = viewModel()) {
+            val items by viewModel.items.collectAsStateWithLifecycle()
+            Feed(items = items)
+        }
+
+        @Composable
+        fun Feed(items: ImmutableList<Item>) { /* ... */ }
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Re-run the diagnostic skill">
+    Re-run `./gradlew :app:assembleRelease` with `reportsDestination` enabled and confirm the previously unstable params are now `stable` or `runtime` in `composables.txt`.
+  </Step>
+</Steps>
+
+## Patterns
+
+### Data class with `var` and a plain `Set` field
+
+<Tabs>
+  <Tab title="Wrong">
+    ```kotlin
+    data class Snack(
+        var name: String,
+        val tags: Set<String>,
+    )
+    ```
+    `var` blocks compile-time stability inference. `Set<String>` is an interface with unknown implementations.
+  </Tab>
+  <Tab title="Right">
+    ```kotlin
+    import kotlinx.collections.immutable.ImmutableSet
+    import kotlinx.collections.immutable.persistentSetOf
+
+    @Immutable
+    data class Snack(
+        val name: String,
+        val tags: ImmutableSet<String> = persistentSetOf(),
+    )
+    ```
+  </Tab>
+</Tabs>
+
+### `java.time.LocalDateTime` flagged unstable
+
+Java time types are separately compiled with no Kotlin metadata, so inference falls through to `Unknown`. Tier 3 is the right answer.
+
+<Tabs>
+  <Tab title="Wrong">
+    ```kotlin
+    @Stable
+    class DateWrapper(var date: LocalDateTime)
+    ```
+    `var` field with no Snapshot notification — the `@Stable` contract is broken; recompositions will be silently missed.
+  </Tab>
+  <Tab title="Right">
+    ```text
+    # stability_config.conf
+    java.time.LocalDateTime
+    java.time.LocalDate
+    java.time.Instant
+    java.time.ZonedDateTime
+    java.time.Duration
+    ```
+
+    ```kotlin
+    @Immutable
+    data class Order(val placedAt: LocalDateTime, val total: Money)
+    ```
+  </Tab>
+</Tabs>
+
+### `@Immutable` versus `@Stable` — always prefer the stronger one
+
+<Tabs>
+  <Tab title="Suboptimal">
+    ```kotlin
+    @Stable
+    data class ThemeColors(
+        val primary: Color,
+        val onPrimary: Color,
+    )
+    ```
+    Works, but `@Immutable` would additionally enable static expression promotion when `ThemeColors` is constructed with all-constant args.
+  </Tab>
+  <Tab title="Preferred">
+    ```kotlin
+    @Immutable
+    data class ThemeColors(
+        val primary: Color,
+        val onPrimary: Color,
+    )
+    ```
+    Call sites like `ThemeColors(Color(0xFFFFFFFF), Color(0xFF000000))` will appear as `stable @static themeColors: ThemeColors` in `composables.txt` — the instance is hoisted to a singleton.
+  </Tab>
+</Tabs>
+
+### Wrapping `Row`/`Column`/`Box` to force skippability
+
+<Tabs>
+  <Tab title="Wrong">
+    ```kotlin
+    @Composable
+    fun ItemRow(item: Item) {
+        Row { /* ... */ }
+    }
+    ```
+    `Row`/`Column`/`Box` are inline composables — they are **not** restartable or skippable. Wrapping them creates a new restart scope without addressing the root unstable parameter.
+  </Tab>
+  <Tab title="Right">
+    ```kotlin
+    @Immutable
+    data class Item(val id: Long, val name: String)
+
+    @Composable
+    fun ItemRow(item: Item) {
+        Row { /* ... */ }
+    }
+    ```
+    Make the parameter stable; leave the inline composable alone.
+  </Tab>
+</Tabs>
+
+## Mandatory rules
+
+- **MUST NOT** annotate a type as `@Stable` or `@Immutable` unless the contract is honored — break it and recompositions are silently missed
+- **MUST** prefer `@Immutable` over `@Stable` whenever every property is a `val` of an already-immutable type
+- **MUST** prefer `kotlinx.collections.immutable` over annotating a mutable collection as stable
+- **MUST NOT** wrap inline composables (`Row`/`Column`/`Box`) to force skippability — it changes scoping without fixing the root cause
+- **MUST NOT** pass `Flow<T>` as a composable parameter — collect upstream with `collectAsStateWithLifecycle`
+- **MUST** re-run the diagnostic skill after applying fixes; previously unstable params must now report `stable` or `runtime`
+
+## Verification
+
+- [ ] Release-mode build with `composeCompiler { reportsDestination = ... }` enabled completes
+- [ ] In `composables.txt`, every previously `unstable` parameter is now `stable` or `runtime`
+- [ ] In `classes.txt`, every fixed class is now `stable class …` or `runtime stable class …`
+- [ ] If `stabilityConfigurationFiles` was used, every entry honors the contract — no hidden mutation, structural `equals`, no observable bypassing Snapshot
+- [ ] `@TraceRecomposition` on the previously hot composable shows recomposition counts dropping to the expected number per state change
+- [ ] No `@Stable`/`@Immutable` annotation has been added to a type that still contains a `var` or unstable nested type
+
+## Related skills
+
+<CardGroup cols={2}>
+  <Card title="Diagnosing Compose Stability" href="/skills/stability/diagnosing-compose-stability">
+    Run this first to generate the list of unstable types this skill fixes.
+  </Card>
+  <Card title="Understanding Stability Inference" href="/skills/stability/understanding-stability-inference">
+    Understand why the compiler classified a type the way it did before applying a fix.
+  </Card>
+  <Card title="Enforcing Stability in CI" href="/skills/stability/enforcing-stability-in-ci">
+    Lock in the fixes by gating PRs against stability regressions.
+  </Card>
+  <Card title="Visualizing Recomposition Cascades" href="/skills/stability/visualizing-recomposition-cascades">
+    Confirm that fixing a type's stability actually reduces runtime recomposition counts.
+  </Card>
+</CardGroup>

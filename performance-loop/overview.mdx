@@ -1,0 +1,88 @@
+---
+title: "The Compose performance loop: Measure, Diagnose, Fix, Verify"
+description: "The four-phase Compose performance loop tells you where to look next. Skipping phases produces guesses, not improvements — learn why order matters."
+---
+
+Every Compose performance problem follows the same shape: you run the app on a device, something feels wrong, and the temptation is to reach immediately for a fix. That temptation is the enemy. Without a measured baseline you cannot prove a fix worked, and without a diagnosis you cannot know which fix to apply. The four-phase loop — **Measure → Diagnose → Fix → Verify** — is the structure that separates provable improvements from lucky guesses.
+
+## The four-phase loop
+
+<Steps>
+  <Step title="Measure">
+    Establish a performance baseline before touching any code. Numbers from a debug build are not representative — Live Literals, interpreted Compose runtime, and the absence of R8 inflate startup times by roughly 75% and frame render times by roughly 60% compared to release. Measure in release, with R8 enabled, on a real physical device. Record cold startup median and scroll `FrameTimingMetric` percentiles (P50 / P90 / P99). These are the numbers every later claim of improvement must beat.
+  </Step>
+  <Step title="Diagnose">
+    Turn symptoms into named causes. The Compose Compiler generates reports (`composables.txt`, `classes.txt`, `module.json`) for every release build. These reports identify every restartable-but-not-skippable composable and every unstable parameter that blocks skipping. Layout Inspector, `@TraceRecomposition` tracing, the Compose Stability Analyzer IDE plugin, and recomposition cascade visualization each add diagnostic signal at different layers. The output of this phase is a prioritized list of causes, ranked by **frequency × cost** — not by compiler-report severity alone.
+  </Step>
+  <Step title="Fix">
+    Apply the targeted code or configuration change that resolves the named cause. Each fix skill in the library is scoped to one cause so the diff stays small and the before/after Macrobenchmark delta is attributable to that single change. One cause per PR: mixed diffs produce mixed deltas, and mixed deltas cannot be bisected.
+  </Step>
+  <Step title="Verify">
+    Confirm the fix moved the right needle and lock it in so it cannot regress. Re-run the same Macrobenchmark after every fix. Regenerate the Baseline Profile so the now-faster code paths are AOT-compiled on install. Commit a stability baseline and wire `stabilityCheck` into CI so a future PR that introduces an unstable parameter fails the build rather than silently degrading scroll performance.
+  </Step>
+</Steps>
+
+<Note>
+After each fix, return to **Measure** and then **Diagnose** before applying the next one. A fix that improves startup may shift the hotspot to a different composable; a second fix applied without re-measuring produces an unfalsifiable claim.
+</Note>
+
+## Why debug builds lie
+
+The two most common measurement mistakes happen before any code is written:
+
+1. **Live Literals.** The Live Literals compiler plugin, active in debug builds for Android Studio's live-edit support, wraps every constant — `0.dp`, `Color.Red`, `"Hello"` — in a getter. The recomposer treats these as dynamic, which inflates recomposition counts and makes composables appear unstable even when the source code only uses constants. Compiler reports generated from a debug build reflect this noise, not the shipping behavior.
+
+2. **Interpreted Compose runtime.** In debug, the Compose UI runtime runs interpreted with JIT warmup happening across the first seconds of the app. R8 in release mode performs lambda grouping, strips `sourceInformation()` calls, devirtualizes `ComposerImpl`, and constant-folds composable arguments — work that directly lowers frame cost. None of that happens in debug.
+
+Always measure in release with `isMinifyEnabled = true`, `isShrinkResources = true`, and `proguard-android-optimize.txt`.
+
+## When to enter through the audit skill
+
+When the symptom is broad — "the app feels sluggish", "scroll is rough everywhere", "we're starting a performance sprint" — and there is no specific composable or surface to target yet, use the orchestrator skill instead of picking a phase manually. The audit skill chains all four phases in order, delegates to the focused skills at each step, and produces a written audit report with before/after Macrobenchmark numbers.
+
+<Card
+  title="Auditing Compose performance"
+  icon="clipboard-list"
+  href="/skills/audit/auditing-compose-performance"
+>
+  End-to-end orchestration skill for broad performance symptoms. Sequences all four phases and produces a written report.
+</Card>
+
+## The Iterate sub-loop
+
+The four-phase loop is a production measurement loop. During active UI development, a separate **Iterate** loop compresses the edit–build–install–navigate–observe cycle into a single save using Compose HotSwan. HotSwan performs class redefinition on the connected device without a full rebuild, giving instant visual feedback on composable edits in seconds.
+
+The Iterate loop is a development-time complement to the performance loop, not a replacement for it. Hot-reload velocity does not substitute for Macrobenchmark numbers on a release build. Use the Iterate skills while implementing fixes; use the performance loop to prove the fixes worked.
+
+## Phase pages
+
+<CardGroup cols={2}>
+  <Card
+    title="Measure"
+    icon="ruler"
+    href="/performance-loop/measure"
+  >
+    Establish a release-mode baseline with Macrobenchmark before changing any code.
+  </Card>
+  <Card
+    title="Diagnose"
+    icon="microscope"
+    href="/performance-loop/diagnose"
+  >
+    Read Compose Compiler reports and recomposition traces to name every cause.
+  </Card>
+  <Card
+    title="Fix"
+    icon="wrench"
+    href="/performance-loop/fix"
+  >
+    Apply the targeted skill that matches the diagnosed cause — one fix per PR.
+  </Card>
+  <Card
+    title="Verify"
+    icon="circle-check"
+    href="/performance-loop/verify"
+  >
+    Re-measure, regenerate the Baseline Profile, and wire the CI stability gate.
+  </Card>
+</CardGroup>

@@ -1,0 +1,166 @@
+---
+title: "Optimizing Lazy Layouts: Keys, contentType, and animateItem"
+description: "Add stable item keys, contentType, and Modifier.animateItem() to fix LazyColumn and LazyVerticalGrid scroll jank. Ensure item composables are skippable."
+---
+
+Lazy layouts compose only what's visible, but two issues still cause jank: re-composition of items that should have been reused (missing `key`), and per-item allocation that compounds with scroll velocity (missing `contentType`, modifier chains created inside `items {}`). Both have a one-line fix. This skill covers applying that fix correctly and validating that item composables are themselves skippable.
+
+## When to use this skill
+
+- Scroll jank, dropped frames, or stutter on `LazyColumn`, `LazyRow`, `LazyVerticalGrid`, or `LazyHorizontalGrid`.
+- Items lose scroll position, focus, or composition state on insert, remove, or reorder.
+- A mixed-type feed (cards + headers + ads + carousels) feels sluggish.
+- `Modifier.animateItem()` was added but no animation runs on inserts or removals.
+- `@TraceRecomposition` shows item composables recomposing on every scroll tick.
+
+## When NOT to use this skill
+
+- The bottleneck is the prefetch window — use `/skills/lists/configuring-lazy-prefetch`.
+- The item composable takes an unstable parameter — run `/skills/stability/diagnosing-compose-stability` first.
+- An animation inside an item reads `state.value` in Composition phase — use `/skills/recomposition/deferring-state-reads`.
+
+## Prerequisites
+
+- Compose Foundation **1.7+** for `Modifier.animateItem()` (the GA replacement for `animateItemPlacement`).
+- Kotlin **2.0.0+** with `org.jetbrains.kotlin.plugin.compose` applied.
+- A real device + release build for measurement. Debug builds lie (Live Literals, interpreted mode).
+
+## Workflow
+
+<Steps>
+  <Step title="Audit every items() call">
+    Walk every `LazyListScope.items(list)`, `itemsIndexed(list)`, and grid equivalents. For each, supply `key = { it.id }` using a stable server-side ID.
+
+    ```kotlin
+    // WRONG
+    LazyColumn { items(snacks) { snack -> SnackRow(snack) } }
+    // WRONG because: index-based identity → insert/remove discards composition state.
+    ```
+
+    ```kotlin
+    // RIGHT
+    LazyColumn {
+        items(
+            items = snacks,
+            key = { it.id },
+            contentType = { it::class },
+        ) { snack ->
+            SnackRow(snack, Modifier.animateItem())
+        }
+    }
+    ```
+
+    **MUST NOT** use list index, `UUID.randomUUID()`, or `hashCode()` of a mutable object as a key.
+  </Step>
+  <Step title="Add contentType for heterogeneous lists">
+    Lazy layouts maintain a per-type composition cache (analogous to RecyclerView's view type). For mixed feeds (cards, headers, ads, dividers), supply a stable type discriminator:
+
+    ```kotlin
+    items(
+        items = feed,
+        key = { it.id },
+        contentType = { item ->
+            when (item) {
+                is FeedItem.Card -> "card"
+                is FeedItem.Header -> "header"
+                is FeedItem.Ad -> "ad"
+            }
+        }
+    ) { item -> FeedRow(item) }
+    ```
+  </Step>
+  <Step title="Validate item composable stability">
+    Run the diagnosing-compose-stability skill. If the item composable accepts an unstable parameter, no amount of `key`/`contentType` work will help — fix the type stability first.
+  </Step>
+  <Step title="Hoist allocation-heavy values out of items lambda">
+    The items lambda runs once per item per recomposition. Painters, color resolutions, `BorderStroke` instances built inside the lambda are reallocated each pass. Hoist constants above the `LazyColumn` or use `remember`.
+  </Step>
+  <Step title="Add Modifier.animateItem() for visual continuity">
+    Pair with a stable `key`. Without `key`, the animation cannot bind to identity and silently no-ops.
+
+    ```kotlin
+    items(snacks, key = { it.id }) { snack ->
+        SnackRow(snack, Modifier.animateItem())
+    }
+    ```
+  </Step>
+  <Step title="Verify with @TraceRecomposition and Layout Inspector">
+    During a controlled scroll, each item composable should recompose at most once per real state change — not per scroll tick.
+  </Step>
+</Steps>
+
+## Patterns
+
+### Complete lazy list setup
+
+```kotlin
+// WRONG — no key, no contentType
+LazyColumn {
+    items(snacks) { snack ->
+        SnackRow(snack)
+    }
+}
+```
+
+```kotlin
+// RIGHT
+@Composable
+fun SnackFeed(snacks: ImmutableList<Snack>) {
+    LazyColumn {
+        items(
+            items = snacks,
+            key = { it.id },
+            contentType = { it::class },
+        ) { snack ->
+            SnackRow(snack, Modifier.animateItem())
+        }
+    }
+}
+```
+
+### Mixed-type feed
+
+```kotlin
+// RIGHT
+sealed interface FeedItem {
+    data class Card(val id: String, val snack: Snack) : FeedItem
+    data class Header(val id: String, val title: String) : FeedItem
+}
+
+LazyColumn {
+    items(
+        items = feed,
+        key = { it.id },
+        contentType = { if (it is FeedItem.Header) "header" else "card" },
+    ) { item ->
+        when (item) {
+            is FeedItem.Card -> SnackRow(item.snack)
+            is FeedItem.Header -> SectionHeader(item.title)
+        }
+    }
+}
+```
+
+## Mandatory rules
+
+- **MUST** supply `key` for every `items(...)` call when elements have stable identity.
+- **MUST NOT** use the list index, `UUID.randomUUID()`, or `hashCode()` of a mutable object as a key.
+- **MUST** supply `contentType` for heterogeneous lists (more than one item composable type).
+- **MUST NOT** build `Painter`, `BorderStroke`, or `Shape` instances inside the items lambda — hoist them.
+- **PREFERRED:** `Modifier.animateItem()` on every item in a list that supports insert/remove animations.
+
+## Verification
+
+- [ ] Every `items(...)` call has a stable `key` parameter.
+- [ ] Mixed-type feeds have a `contentType` parameter.
+- [ ] Item composables are `restartable skippable` in `*-composables.txt`.
+- [ ] Layout Inspector shows item recomposition counts plateau during a controlled scroll.
+
+<CardGroup cols={2}>
+  <Card title="Configuring Lazy Prefetch" icon="forward" href="/skills/lists/configuring-lazy-prefetch">
+    Tune the prefetch window and pausable composition for heavy items.
+  </Card>
+  <Card title="Diagnosing Compose Stability" icon="magnifying-glass" href="/skills/stability/diagnosing-compose-stability">
+    Find and fix unstable item composable parameters.
+  </Card>
+</CardGroup>

@@ -1,0 +1,155 @@
+---
+title: "Fix Compose performance: targeted code changes by cause"
+description: "Each fix skill is scoped to one named cause. Apply the skill that matches your diagnosis, keep the diff small, and re-measure before the next fix."
+---
+
+The Fix phase applies one targeted change at a time — one named cause, one skill, one PR. The discipline matters: a PR that simultaneously wraps four data classes in `ImmutableList`, migrates two custom modifiers to `Modifier.Node`, and moves three state reads down a phase produces a Macrobenchmark delta that cannot be attributed to any single change. If startup improved but scroll regressed, you cannot bisect the cause. Keep each fix minimal, re-measure after it lands, and only then pick the next issue from your diagnosis list.
+
+## The principle
+
+Every fix skill in the library is scoped to one cause. The skill's prerequisites list what the Diagnose phase must have told you before you apply it, and its Verification checklist confirms the fix landed without introducing a new regression. Read both before writing code.
+
+<Tip>
+After every fix, return to the Measure phase and re-run the same Macrobenchmark before applying the next fix. A fix that improves P90 frame timing may shift the bottleneck elsewhere; a second fix applied without re-measuring produces an unfalsifiable claim.
+</Tip>
+
+## Fix skills by category
+
+### Stability
+
+Unstable parameters are the most common cause of unnecessary recomposition. When `composables.txt` shows `unstable snacks: List<Snack>`, the fix is here.
+
+<CardGroup cols={2}>
+  <Card
+    title="Stabilizing Compose types"
+    icon="shield-check"
+    href="/skills/stability/stabilizing-compose-types"
+  >
+    Three-tier waterfall: rewrite mutable types, annotate with `@Stable` or `@Immutable` where the contract holds, and configure `stability_config.conf` for third-party types.
+  </Card>
+  <Card
+    title="Using strong skipping correctly"
+    icon="fast-forward"
+    href="/skills/recomposition/using-strong-skipping-correctly"
+  >
+    Verify strong skipping mode is on, audit lambda capture sites for `@DontMemoize` and `@NonSkippableComposable` escape hatches, and confirm auto-memoization behavior in `LazyListScope.items { }`.
+  </Card>
+</CardGroup>
+
+### Recomposition
+
+Phase-misplaced state reads and `derivedStateOf` misuse produce recomposition even when stability is correct.
+
+<CardGroup cols={2}>
+  <Card
+    title="Deferring state reads"
+    icon="arrow-down-to-dot"
+    href="/skills/recomposition/deferring-state-reads"
+  >
+    Push animated state reads out of Composition into Layout or Draw using `Modifier.offset { }`, `Modifier.graphicsLayer { }`, and `Modifier.drawBehind { }`.
+  </Card>
+  <Card
+    title="Choosing derivedStateOf"
+    icon="git-branch"
+    href="/skills/recomposition/choosing-derivedstateof"
+  >
+    Apply `derivedStateOf` only when the input state changes more frequently than the derived value. Covers missing `remember`, captured non-state variables, and wrong-use-case patterns.
+  </Card>
+  <Card
+    title="Avoiding subcomposition pitfalls"
+    icon="layers"
+    href="/skills/recomposition/avoiding-subcomposition-pitfalls"
+  >
+    Recognize when `SubcomposeLayout`, `BoxWithConstraints`, and `Scaffold` compose during the measure pass and when nesting or per-item use multiplies the cost unacceptably.
+  </Card>
+</CardGroup>
+
+### Lists
+
+Scroll jank in `LazyColumn` and `LazyVerticalGrid` has its own dedicated fix surface.
+
+<CardGroup cols={2}>
+  <Card
+    title="Optimizing lazy layouts"
+    icon="list"
+    href="/skills/lists/optimizing-lazy-layouts"
+  >
+    Stable `key`, `contentType` for mixed-type lists, `Modifier.animateItem()`, and hoisting modifier chains out of the `items { }` lambda.
+  </Card>
+  <Card
+    title="Configuring lazy prefetch"
+    icon="gauge"
+    href="/skills/lists/configuring-lazy-prefetch"
+  >
+    Tune `LazyLayoutCacheWindow`, enable pausable prefetch, and configure `NestedPrefetchScope` when default Compose Foundation 1.10+ settings still drop frames at high scroll velocity.
+  </Card>
+</CardGroup>
+
+### Modifiers
+
+Custom modifiers that use the legacy `composed { }` API allocate a fresh scope on every parent invalidation.
+
+<CardGroup cols={2}>
+  <Card
+    title="Migrating to Modifier.Node"
+    icon="node"
+    href="/skills/modifiers/migrating-to-modifier-node"
+  >
+    Migrate `Modifier.composed { }` to `Modifier.Node` and `ModifierNodeElement` so the modifier instance is reused rather than reallocated.
+  </Card>
+  <Card
+    title="Ordering modifier chains"
+    icon="arrow-right-left"
+    href="/skills/modifiers/ordering-modifier-chains"
+  >
+    Fix measurement and painting order bugs caused by wrong `.then()` sequencing — `clip` after `background`, `padding` before `clickable`, and similar ordering mistakes.
+  </Card>
+</CardGroup>
+
+### Side effects
+
+Unsafe flow collection drains battery in the background. Wrong effect APIs cause unexpected restarts.
+
+<CardGroup cols={2}>
+  <Card
+    title="Collecting flows safely"
+    icon="droplets"
+    href="/skills/side-effects/collecting-flows-safely"
+  >
+    Replace `collectAsState()` with `collectAsStateWithLifecycle`, hoist `Flow<T>` parameters out of composables, and add `.conflate()` and `.distinctUntilChanged()` where appropriate.
+  </Card>
+  <Card
+    title="Using efficient effects"
+    icon="zap"
+    href="/skills/side-effects/using-efficient-effects"
+  >
+    Pick the cheapest correct effect API: `LaunchedEffect` vs `RememberedEffect` vs `DisposableEffect` vs `SideEffect`, and fix stale callbacks with `rememberUpdatedState`.
+  </Card>
+</CardGroup>
+
+## One cause per PR
+
+The table below illustrates what a correct Phase 3 record looks like in an audit report — each row is a separate PR with its own Macrobenchmark delta:
+
+| Skill applied | Root cause | Files changed | Macrobench delta |
+|---|---|---|---|
+| `stability/stabilizing-compose-types` | `List<Snack>` parameter → `ImmutableList<Snack>` | `feed/SnackList.kt`, `data/Snack.kt` | Scroll P90: 18 ms → 12 ms |
+| `recomposition/deferring-state-reads` | `Modifier.alpha(scrollProgress)` in Composition | `hero/HeroHeader.kt` | Scroll P99: 33 ms → 19 ms |
+| `lists/optimizing-lazy-layouts` | Missing `key` in `LazyColumn` items | `feed/FeedScreen.kt` | Scroll P50: 9 ms → 6 ms |
+| `modifiers/migrating-to-modifier-node` | `composed { }` in `Modifier.shimmer()` | `ui/ShimmerModifier.kt` | Scroll P95: 22 ms → 14 ms |
+
+If a PR produces a mixed result — startup faster, scroll slower — the table makes that visible and the regression is attributable to exactly one change.
+
+## What each fix skill expects as input
+
+Every fix skill lists prerequisites in its **When to use** section. The most common expectation is a specific line from `composables.txt` or `classes.txt` naming the cause. Before opening a fix skill, confirm you have:
+
+- The composable function name and the unstable parameter (from `composables.txt`)
+- The root cause of the instability (a `var` field, a `List`, a third-party type) from `classes.txt`
+- A Macrobenchmark number from the Measure phase to compare against after the fix
+
+Without those inputs, the fix skill will tell you to go back and diagnose first.
+
+<Note>
+Skippability is a diagnostic output of the fix, not a target. Do not apply stability fixes to composables that are not on the hot path — a `@Preview` composable or a settings screen that renders once never benefits from being skippable, and the annotation introduces a contract you must maintain indefinitely.
+</Note>

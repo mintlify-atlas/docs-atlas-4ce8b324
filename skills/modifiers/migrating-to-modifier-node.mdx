@@ -1,0 +1,145 @@
+---
+title: "Migrating Custom Modifiers from composed {} to Modifier.Node"
+description: "Replace Modifier.composed {} with Modifier.Node and ModifierNodeElement to eliminate per-recomposition allocation and parent invalidation in custom modifiers."
+---
+
+`Modifier.composed {}` allocates a fresh composable scope per modifier per composition — it cannot be skipped, cannot be hoisted, and forces the parent to run on every recomposition. `Modifier.Node` is a persistent node diffed by `ModifierNodeElement.equals()`: created once on first apply, updated in place on subsequent applies. There is no per-recomposition allocation, no fresh composable scope, and no parent invalidation chain. This skill covers authoring new modifiers as `Modifier.Node` and migrating legacy `composed {}` factories.
+
+## When to use this skill
+
+- A custom modifier uses `Modifier.composed {}` anywhere in the module.
+- Authoring a new custom modifier — never start with `composed {}`.
+- A `@TraceRecomposition` log shows the parent composable recomposing per frame because a `composed {}` modifier is in the chain.
+- The custom modifier needs a `CoroutineScope`, reads a `CompositionLocal`, participates in layout/draw/pointer input, or tracks layout coordinates.
+
+## When NOT to use this skill
+
+- The "modifier" is a one-line composable wrapper — leave it as `@Composable fun`.
+- The built-in modifier composition (`Modifier.padding().clickable()`) is sufficient.
+- The fix needed is reordering an existing chain — see `/skills/modifiers/ordering-modifier-chains`.
+
+## Prerequisites
+
+- **Compose UI 1.5+** for stable `Modifier.Node` and specialized node interfaces.
+- Kotlin 2.0+ with `org.jetbrains.kotlin.plugin.compose` applied.
+- A release build for final measurement.
+
+## The three pieces of every migration
+
+Every `Modifier.Node` migration produces three artifacts:
+
+1. **Public extension** — `fun Modifier.foo(...): Modifier = this then FooElement(...)`
+2. **`ModifierNodeElement<T>` data class** — holds parameters; implements `create()` and `update(node: T)`
+3. **`Modifier.Node` subclass** — holds mutable state, implements specialized node interfaces, runs lifecycle hooks
+
+## Specialized node interfaces
+
+| Interface | Use when the modifier needs to… |
+|---|---|
+| `DrawModifierNode` | draw (replaces `drawBehind`/`drawWithCache`) |
+| `LayoutModifierNode` | measure/place (replaces `layout {}` and custom `Layout`) |
+| `SemanticsModifierNode` | contribute to accessibility |
+| `PointerInputModifierNode` | handle pointer/gesture input (replaces `pointerInput`) |
+| `CompositionLocalConsumerModifierNode` | read a `CompositionLocal` from inside the node |
+| `LayoutAwareModifierNode` | get notified when the node's size/coordinates change |
+| `ObserverModifierNode` | observe arbitrary state reads with a custom observer |
+| `DelegatingNode` | compose multiple node behaviors by delegating to child nodes |
+
+## Workflow
+
+<Steps>
+  <Step title="Find all Modifier.composed {} factories">
+    Grep the module for `Modifier.composed`. Each match is one migration target. Note what the body does — `remember`, `drawBehind`, `LaunchedEffect`, a `CompositionLocal` read — to determine which node interfaces are needed.
+  </Step>
+  <Step title="Sketch the three pieces">
+    Plan the public extension, the `ModifierNodeElement` data class, and the `Modifier.Node` subclass before writing any code.
+  </Step>
+  <Step title="Make the Element a data class">
+    The compiler-synthesized `equals()`/`hashCode()` are how Compose decides whether to call `update()` vs leave the node alone. **MUST** be `data class`. A plain `class` falls back to referential equality and `update()` is never called — the node holds stale parameters silently.
+  </Step>
+  <Step title="Implement the node with correct lifecycle hooks">
+    ```kotlin
+    // WRONG — legacy composed {} factory
+    fun Modifier.badge(count: Int): Modifier = composed {
+        val density = LocalDensity.current
+        drawBehind {
+            drawCircle(Color.Red, radius = 8.dp.toPx())
+        }
+    }
+    // WRONG because: a fresh composable scope allocates per composition; parent recomposes
+    // every time the modifier changes, and the @Composable lambda is not skippable.
+    ```
+
+    ```kotlin
+    // RIGHT — Modifier.Node + ModifierNodeElement
+    fun Modifier.badge(count: Int): Modifier = this then BadgeElement(count)
+
+    private data class BadgeElement(val count: Int) : ModifierNodeElement<BadgeNode>() {
+        override fun create() = BadgeNode(count)
+        override fun update(node: BadgeNode) { node.count = count }
+    }
+
+    private class BadgeNode(var count: Int) : DrawModifierNode, Modifier.Node() {
+        override fun ContentDrawScope.draw() {
+            drawContent()
+            if (count > 0) drawCircle(Color.Red, radius = 8.dp.toPx())
+        }
+    }
+    ```
+  </Step>
+  <Step title="Use the built-in coroutineScope for async work">
+    Every `Modifier.Node` exposes `coroutineScope: CoroutineScope` lazily tied to the node's attach/detach lifecycle. **MUST NOT** create your own `CoroutineScope` inside `onAttach` — it leaks past `onDetach`.
+
+    ```kotlin
+    override fun onAttach() {
+        coroutineScope.launch {
+            // animation loop, debouncer, etc.
+        }
+    }
+    ```
+  </Step>
+  <Step title="Trigger re-runs explicitly when needed">
+    When mutating node state from `update()` or a coroutine and needing a redraw/re-measure, call `invalidateDraw()`, `invalidateMeasurement()`, or `invalidatePlacement()`. For fine control, override `shouldAutoInvalidate = false`.
+  </Step>
+  <Step title="Verify: no composed {} remains">
+    Re-grep the module. If any `composed {}` calls survive, list them with rationale.
+  </Step>
+</Steps>
+
+## Reading a CompositionLocal inside a node
+
+```kotlin
+// RIGHT — use CompositionLocalConsumerModifierNode
+private class LocalAwareNode : DrawModifierNode,
+    CompositionLocalConsumerModifierNode, Modifier.Node() {
+
+    override fun ContentDrawScope.draw() {
+        val density = currentValueOf(LocalDensity)
+        // use density...
+        drawContent()
+    }
+}
+```
+
+## Mandatory rules
+
+- **MUST** make `ModifierNodeElement` a `data class` — the diff depends on `equals()`.
+- **MUST NOT** use `Modifier.composed {}` for new modifiers. Always start with `Modifier.Node`.
+- **MUST NOT** create a `CoroutineScope` manually inside `onAttach()` — use the built-in `coroutineScope`.
+- **MUST** release listeners, observers, and subscriptions in `onDetach()`.
+- **PREFERRED:** `DelegatingNode` for complex multi-behavior modifiers rather than one node implementing five interfaces.
+
+## Verification
+
+- [ ] Grep for `Modifier.composed` returns zero results (or each remaining instance has a comment explaining why).
+- [ ] `@TraceRecomposition` shows the parent composable no longer recomposes per frame due to the migrated modifier.
+- [ ] The `ModifierNodeElement` is a `data class` with all parameters included in the primary constructor.
+
+<CardGroup cols={2}>
+  <Card title="Ordering Modifier Chains" icon="list-ol" href="/skills/modifiers/ordering-modifier-chains">
+    Fix paint region, click area, and clip ordering bugs.
+  </Card>
+  <Card title="Deferring State Reads" icon="arrow-down" href="/skills/recomposition/deferring-state-reads">
+    Move hot state reads out of Composition phase.
+  </Card>
+</CardGroup>

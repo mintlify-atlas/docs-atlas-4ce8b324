@@ -1,0 +1,154 @@
+---
+title: "Diagnose Compose performance issues with compiler reports"
+description: "Turn symptoms into named causes with Compose Compiler reports, recomposition tracing, and the IDE plugin — not guesses about what might be slow."
+---
+
+After you have a measured baseline, the next job is to name every cause before touching any code. Diagnosis sounds slower than jumping to a fix, but skipping it is how teams spend three weeks wrapping `List` in `ImmutableList` everywhere and then measure no meaningful improvement — because the real bottleneck was a state read in the wrong phase, not stability. The Diagnose phase is where you learn exactly which composable, which parameter, and which mechanism is responsible for the performance cost you measured.
+
+## The diagnostic surface
+
+The Compose toolchain exposes four distinct layers of diagnostic signal:
+
+| Layer | Tool | What it reveals |
+|---|---|---|
+| Compile-time | Compose Compiler reports | Which composables are non-skippable and why |
+| Compile-time | Compose Stability Analyzer IDE plugin | Inline stability annotations as you edit |
+| Runtime (debug) | Layout Inspector | Recomposition and skip counts sampled from a live session |
+| Runtime (release) | `@TraceRecomposition` + recomposition cascade visualization | Deterministic counts from a release build |
+
+Use all four, in order from cheapest to most expensive. The compiler reports are free — they run as part of `assembleRelease` and require only a flag. The IDE plugin gives you continuous feedback without any build. The Layout Inspector and `@TraceRecomposition` confirm that what the compiler classifies as unstable actually causes elevated recomposition counts at runtime.
+
+## Skills in this phase
+
+<CardGroup cols={2}>
+  <Card
+    title="Diagnosing Compose stability"
+    icon="file-search"
+    href="/skills/stability/diagnosing-compose-stability"
+  >
+    Enable Compose Compiler reports and read `composables.txt`, `classes.txt`, and `module.json` to find every non-skippable composable and the unstable parameter that blocks it.
+  </Card>
+  <Card
+    title="Understanding stability inference"
+    icon="cpu"
+    href="/skills/stability/understanding-stability-inference"
+  >
+    Walk the 12-phase stability inference algorithm when a class is classified `runtime`, `unknown`, or `unstable` and the reason is not obvious.
+  </Card>
+  <Card
+    title="Debugging recompositions"
+    icon="layout-grid"
+    href="/skills/recomposition/debugging-recompositions"
+  >
+    Use Layout Inspector recomposition counts and Argument Change Reasons to identify hotspots in a live debug session.
+  </Card>
+  <Card
+    title="Tracing recompositions at runtime"
+    icon="activity"
+    href="/skills/measurement/tracing-recompositions-at-runtime"
+  >
+    Apply `@TraceRecomposition` for deterministic recomposition counts from a release build, where Layout Inspector cannot reach.
+  </Card>
+  <Card
+    title="Using the Stability Analyzer IDE plugin"
+    icon="plugin"
+    href="/skills/stability/using-stability-analyzer-ide-plugin"
+  >
+    Read inline stability annotations and triage `UnstableComposable` inspections in the editor, without running a Gradle build.
+  </Card>
+  <Card
+    title="Visualizing recomposition cascades"
+    icon="share-2"
+    href="/skills/stability/visualizing-recomposition-cascades"
+  >
+    See which composables a single parameter change would invalidate downstream, and use the live heatmap to confirm hotspots during interaction.
+  </Card>
+</CardGroup>
+
+## Reading the Compose Compiler reports
+
+Enable reports for the release variant only — debug builds add Live Literals noise that makes constants appear dynamic:
+
+```kotlin
+// app/build.gradle.kts
+composeCompiler {
+    reportsDestination = layout.buildDirectory.dir("compose_compiler")
+    metricsDestination = layout.buildDirectory.dir("compose_compiler")
+}
+```
+
+```bash
+./gradlew :app:assembleRelease -PcomposeCompilerReports=true
+```
+
+Four files land at `app/build/compose_compiler/`:
+
+```
+app_release-classes.txt        # per-class stability verdict
+app_release-composables.txt    # per-composable signatures with per-param annotations
+app_release-composables.csv    # CSV mirror (CI-friendly)
+app_release-module.json        # aggregate counts for before/after comparison
+```
+
+Start with `composables.txt`. Search for every `restartable` function that is **not** also marked `skippable`. Each one is a recomposition entry point that cannot be skipped when its parent recomposes. Read the per-parameter prefix on each argument: `stable`, `unstable`, `@static`, or `@dynamic`. Any `unstable` parameter blocks skipping for the entire composable.
+
+```text
+restartable scheme("[androidx.compose.ui.UiComposable]") fun HighlightedSnacks(
+  stable index: Int,
+  unstable snacks: List<Snack>,          // ← blocks skipping
+  stable onSnackClick: Function1<Long, Unit>,
+)
+```
+
+Then open `classes.txt` to find the root cause of each unstable type:
+
+```text
+unstable class Snack {
+  stable val id: Long
+  stable val name: String
+  unstable val tags: List<String>        // ← List<T> is an interface; compiler can't prove immutability
+  <runtime stability> = Unstable
+}
+```
+
+<Note>
+A class annotated `runtime stable class Box { stable val value: T }` is **not** a problem. The compiler emits a synthetic `$stable: Int` field and checks it at runtime. Do not annotate `runtime` classes with `@Stable` to "promote" them — the runtime check is the correct mechanism.
+</Note>
+
+## Common symptom-to-diagnosis mappings
+
+| Symptom | Likely diagnosis | Skill |
+|---|---|---|
+| High recomposition count even when params look equal | `List`, `Set`, `Map`, or `Flow` parameter — unstable interface type | [diagnosing-compose-stability](/skills/stability/diagnosing-compose-stability) |
+| Entire screen recomposes during scroll or animation | State read in Composition phase instead of Layout or Draw | [debugging-recompositions](/skills/recomposition/debugging-recompositions) |
+| Compiler report shows unstable third-party type | No `stability_config.conf` entry for the dependency | [diagnosing-compose-stability](/skills/stability/diagnosing-compose-stability) |
+| Compiler report unreadable, surprising, or absent | Reports not enabled, generated from a debug build, or output format unfamiliar | [diagnosing-compose-stability](/skills/stability/diagnosing-compose-stability) |
+| Why is class X classified `runtime` / `unknown` / `unstable`? | Generics, cycles, or separate compilation edge cases in the inference algorithm | [understanding-stability-inference](/skills/stability/understanding-stability-inference) |
+| Need to confirm a specific composable recomposes too often | No instrumentation in place | [tracing-recompositions-at-runtime](/skills/measurement/tracing-recompositions-at-runtime) |
+| Want instant stability feedback while editing without a build | Compose Stability Analyzer IDEA plugin not installed | [using-stability-analyzer-ide-plugin](/skills/stability/using-stability-analyzer-ide-plugin) |
+| Need to see which composables a single change would invalidate | No call-graph visualization in place | [visualizing-recomposition-cascades](/skills/stability/visualizing-recomposition-cascades) |
+
+## Prioritizing by frequency × cost
+
+The compiler report's aggregate count of non-skippable composables is not a triage ranking — it is a regression sentinel. A composable that runs once during settings screen initialization costs nothing. The same composable inside a `LazyColumn` item that renders 60 times during a fast scroll costs everything.
+
+Before handing off to the Fix phase, rank the issues by **frequency × cost**:
+
+1. Count how often a composable is called per scroll or animation frame (from `@TraceRecomposition` or Layout Inspector).
+2. Multiply by the measured frame cost of that subtree (from `FrameTimingMetric` P99).
+3. Fix the composable with the highest product first.
+
+<Tip>
+Skippability is a diagnostic, not a KPI. Chasing 100% skippable composables is not the goal. The goal is `FrameTimingMetric` and `StartupTimingMetric` improvement. A composable that runs once at startup and never again during user interaction does not need to be skippable — the cost of making it skippable may exceed any runtime benefit.
+</Tip>
+
+## Output of this phase
+
+By the end of the Diagnose phase you should have:
+
+- A list of every restartable-not-skippable composable on the hot path, with the specific unstable parameter and its root cause from `classes.txt`
+- Confirmation from `@TraceRecomposition` or Layout Inspector that the compiler's verdict correlates with elevated runtime recomposition counts
+- A ranked list (frequency × cost) of the top issues to fix
+- A snapshot of `module.json` to compare against after fixes are applied
+
+Carry these into the Fix phase. Each item on the ranked list maps to exactly one fix skill.

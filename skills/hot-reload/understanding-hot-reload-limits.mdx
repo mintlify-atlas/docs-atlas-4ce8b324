@@ -1,0 +1,128 @@
+---
+title: "Understanding Compose HotSwan Hot Reload Limits"
+description: "Know which Compose changes hot-reload in HotSwan vs force a rebuild. ART schema immutability rules, supported-changes table, and batch-to-end strategy."
+---
+
+Android Runtime (ART) enforces strict rules for class redefinition: a redefined class must have an identical schema (fields, method signatures, interfaces) as the previous version. Only method bodies are mutable at runtime. HotSwan automatically detects schema changes and falls back to a full incremental build — failures are not silent. Knowing the boundary in advance keeps an iteration loop sub-second instead of multi-second.
+
+## When to use this skill
+
+- The developer asks "why did this trigger a full rebuild?" or "what does HotSwan support?"
+- A PR review surfaces a refactor (parameter change, constructor change, interface extraction, new resource ID) that would push the hot-reload session into a rebuild.
+- The developer wants to order edits so slow ones happen at the end of the session.
+
+## When NOT to use this skill
+
+- Setup or first-run troubleshooting — see `/skills/hot-reload/setting-up-compose-hotswan`.
+- State was lost after a reload — see `/skills/hot-reload/preserving-state-across-reloads`.
+
+## Prerequisites
+
+- HotSwan installed and verified with tool window status `WATCHING`.
+- Familiarity with the Kotlin compiler's distinction between method-body changes and class-schema changes.
+
+## What hot-reloads vs what forces a rebuild
+
+<Tabs>
+  <Tab title="Hot-reloadable (fast path)">
+    | Change | Notes |
+    |---|---|
+    | Composable function body | text, colors, modifiers, layout, control flow inside the function |
+    | Non-composable function body | ViewModel methods, mappers, utilities |
+    | Adding a new composable | same file or new file |
+    | Reordering composables | HotSwan 1.2.0+ |
+    | Resource value changes | existing `strings.xml`, `colors.xml`, `dimens.xml` values |
+    | Extension functions | including suspend, vararg |
+    | Adding `data class` properties | API 30+ only |
+    | Numeric, string, float literal patches | compiled separately for fastest reload |
+  </Tab>
+  <Tab title="Forces full rebuild">
+    | Change | Reason |
+    |---|---|
+    | Adding or removing function parameters | method signature changes |
+    | Constructor changes | parameter list, default values, init blocks affecting fields |
+    | Interface or superclass changes | class hierarchy is part of the schema |
+    | Adding **new** resource IDs | new `R.string`, `R.drawable`, `R.id` entries require `R` class regeneration |
+    | Inline functions | expanded at every call site; no discrete unit to swap |
+    | Lambda count change inside a function | internal lambda class renumbering |
+    | Removing a previously defined function | method table shrinks |
+    | Adding `data class` properties below API 30 | constructor schema change |
+  </Tab>
+</Tabs>
+
+## Workflow when a change does not hot-reload
+
+<Steps>
+  <Step title="Watch the HotSwan tool window">
+    A schema change surfaces as "falling back to incremental build" in the tool window. That is the explicit signal — not a silent failure.
+  </Step>
+  <Step title="Read the change diff">
+    Decide: is this a body-only change, or a schema change (signature, constructor, interface, field, new resource ID, inline body, lambda count)?
+  </Step>
+  <Step title="Batch schema changes to the end of the session">
+    First make all body-only changes that get the screen to a working visual state and hot-reload them. Then, in a separate save, make the schema change and accept the single rebuild.
+  </Step>
+  <Step title="Handle inline functions during iteration">
+    Remove `inline` for the duration of iteration, hot-reload as needed, then restore `inline` before commit. If the performance characteristic must be preserved during iteration, accept the rebuild.
+  </Step>
+  <Step title="Handle new resource IDs by batching additions first">
+    Add all new IDs in one commit, accept one rebuild, then iterate on their values. Editing an existing string value hot-reloads; adding a new `<string name="...">` entry does not.
+  </Step>
+</Steps>
+
+## Patterns
+
+### Body change (fast path) vs signature change (rebuild)
+
+```kotlin
+// HOT-RELOADABLE — body change only
+@Composable
+fun PriceTag(price: Price) {
+    Text(
+        text = price.formatted,
+        color = Color(0xFF4CAF50),  // changed from Red to Green — body only
+    )
+}
+```
+
+```kotlin
+// FORCES REBUILD — signature changed (new parameter added)
+@Composable
+fun PriceTag(price: Price, currency: Currency) {  // new param = schema change
+    Text(text = price.format(currency))
+}
+```
+
+### New resource ID vs updated value
+
+```xml
+<!-- FORCES REBUILD — new ID added to strings.xml -->
+<string name="brand_new_label">New Label</string>
+```
+
+```xml
+<!-- HOT-RELOADABLE — existing ID value changed -->
+<string name="existing_label">Updated text</string>
+```
+
+## Mandatory rules
+
+- **MUST** watch the HotSwan tool window status after every save to confirm whether tier 1 ran or a rebuild was triggered.
+- **MUST** batch schema changes to the end of an iteration session so body-only edits can hot-reload first.
+- **MUST NOT** assume an inline function body change will hot-reload — it will not.
+- **PREFERRED:** remove `inline` from functions being heavily iterated and restore before commit.
+
+## Verification
+
+- [ ] HotSwan tool window shows tier 1 reload (not "falling back to incremental build") for all body-only edits.
+- [ ] Schema changes (parameter adds, constructor changes) are batched to the end of the session.
+- [ ] No `inline fun` is iterated without acknowledging the rebuild cost.
+
+<CardGroup cols={2}>
+  <Card title="Setting Up Compose HotSwan" icon="plug" href="/skills/hot-reload/setting-up-compose-hotswan">
+    Install and verify HotSwan end to end.
+  </Card>
+  <Card title="Preserving State Across Reloads" icon="floppy-disk" href="/skills/hot-reload/preserving-state-across-reloads">
+    Understand the three reload tiers and which state survives each.
+  </Card>
+</CardGroup>

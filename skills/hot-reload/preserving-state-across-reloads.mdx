@@ -1,0 +1,112 @@
+---
+title: "Preserving State Across HotSwan Reloads with the Three Tiers"
+description: "HotSwan reloads in three tiers — targeted recomposition, composition reset, Activity recreate. Learn which state each tier preserves and how to stay in tier 1."
+---
+
+Compose HotSwan applies every hot reload through three escalating tiers. Tier 1 (targeted recomposition) preserves the most: scroll position, navigation back stack, `remember` and `rememberSaveable` values, `ViewModel` state, lazy layout items, and dialog state. Tier 2 (composition reset) drops per-composable `remember`. Tier 3 (`Activity.recreate()`) restarts the Activity and only `ViewModel` or `SavedInstanceState` survives. Keeping every reload in tier 1 produces the fastest, least-surprising iteration loop.
+
+## When to use this skill
+
+- "Scroll jumped to top after a hot reload," "lost dialog state," "lazy column re-fetched," or "tab selection reset."
+- Planning a refactor and wanting to know which recomposition scope the change touches.
+- The HotSwan tool window shows tier 2 or tier 3 and the developer wants to understand why it escalated.
+
+## When NOT to use this skill
+
+- The change was rejected as a schema violation — see `/skills/hot-reload/understanding-hot-reload-limits`.
+- HotSwan is not installed — see `/skills/hot-reload/setting-up-compose-hotswan`.
+- The developer wants an AI agent to drive the loop — see `/skills/hot-reload/iterating-with-ai-and-mcp`.
+
+## The three tiers
+
+| Tier | Mechanism | Preserves | Loses | Triggered when |
+|---|---|---|---|---|
+| **1 — Targeted recomposition** | Recomposes only affected scopes in place | Navigation, scroll, `remember`, `rememberSaveable`, `ViewModel`, lazy items, dialog state | Nothing | Simple body change inside one composable scope |
+| **2 — Composition reset** | Disposes and recreates all compositions | Activity, `ViewModel`, navigation, `rememberSaveable` (if retained) | Per-composable `remember` not retained by a `Saveable` | Theme change, root-scope structural change |
+| **3 — `Activity.recreate()`** | Restarts the entire Activity | `ViewModel`, `SavedInstanceState` | Scroll, transient dialog state, `remember` without `Saveable` | Composition fails or schema mismatch detected |
+
+The tier that ran is reported in the HotSwan tool window status after every reload.
+
+## Workflow
+
+<Steps>
+  <Step title="Read the tier from the tool window after every reload">
+    The HotSwan tool window prints the tier (1, 2, or 3) for each reload. If you expected tier 1 and got tier 2 or 3, the edit touched a wider scope than intended.
+  </Step>
+  <Step title="Convert local remember to rememberSaveable for state lost on tier 2">
+    Tier 2 disposes per-composable `remember` blocks. Walk the composable that lost state and convert its local `remember` to `rememberSaveable` for any value that should survive a composition reset.
+
+    ```kotlin
+    // WRONG — lost on tier 2 reload
+    var selectedTab by remember { mutableStateOf(0) }
+    ```
+
+    ```kotlin
+    // RIGHT — survives tier 2 composition reset
+    var selectedTab by rememberSaveable { mutableStateOf(0) }
+    ```
+  </Step>
+  <Step title="Hoist long-iteration UI state into a ViewModel">
+    When edits keep escalating to tier 2 or tier 3, hoist transient UI state (selected tab, expanded item, scroll position, dialog open) into a `ViewModel`. `ViewModel` survives all three tiers.
+
+    ```kotlin
+    // RIGHT — scroll position survives all tiers via ViewModel
+    class FeedViewModel : ViewModel() {
+        val listState = LazyListState()
+    }
+
+    @Composable
+    fun FeedScreen(vm: FeedViewModel = viewModel()) {
+        LazyColumn(state = vm.listState) { /* ... */ }
+    }
+    ```
+  </Step>
+  <Step title="Avoid editing theme and root CompositionLocals during fast loops">
+    Editing a value used by `MaterialTheme` or any `staticCompositionLocalOf` invalidates the root content lambda and forces tier 2. During active iteration, move the color/dimension/typography under test into a local override on the composable being tuned, then promote to the theme once finalized.
+  </Step>
+  <Step title="Use compositionLocalOf instead of staticCompositionLocalOf for iterated values">
+    ```kotlin
+    // WRONG for iteration — any change forces tier 2
+    val LocalBrandColor = staticCompositionLocalOf { Color.Blue }
+    ```
+
+    ```kotlin
+    // RIGHT for iteration — tracks reads, only recomposes consumers
+    val LocalBrandColor = compositionLocalOf { Color.Blue }
+    ```
+  </Step>
+</Steps>
+
+## State survival summary
+
+| State holder | Tier 1 | Tier 2 | Tier 3 |
+|---|---|---|---|
+| `remember { }` | ✓ | ✗ | ✗ |
+| `rememberSaveable { }` | ✓ | ✓ | ✓ |
+| `LazyListState` (local) | ✓ | ✗ | ✗ |
+| `LazyListState` (in ViewModel) | ✓ | ✓ | ✓ |
+| `ViewModel` state | ✓ | ✓ | ✓ |
+| `NavController` back stack | ✓ | ✓ | ✗ |
+| `SavedInstanceState` | ✓ | ✓ | ✓ |
+
+## Mandatory rules
+
+- **MUST** read the HotSwan tool window tier after every reload when diagnosing state loss.
+- **PREFERRED:** `rememberSaveable` over `remember` for any state that should survive a composition reset during long iteration sessions.
+- **PREFERRED:** hoist transient UI state into a `ViewModel` when the iteration session involves edits that consistently escalate to tier 2 or tier 3.
+- **MUST NOT** use `staticCompositionLocalOf` for values that change frequently during iteration.
+
+## Verification
+
+- [ ] HotSwan tool window shows tier 1 for all simple body-only edits.
+- [ ] State that was previously lost on tier 2 is now held in `rememberSaveable` or a `ViewModel`.
+- [ ] No `staticCompositionLocalOf` is used for values being actively iterated.
+
+<CardGroup cols={2}>
+  <Card title="Understanding Hot Reload Limits" icon="triangle-exclamation" href="/skills/hot-reload/understanding-hot-reload-limits">
+    Which changes stay in tier 1 and which force a rebuild.
+  </Card>
+  <Card title="Iterating with AI and MCP" icon="robot" href="/skills/hot-reload/iterating-with-ai-and-mcp">
+    Drive the reload loop autonomously from an AI agent.
+  </Card>
+</CardGroup>

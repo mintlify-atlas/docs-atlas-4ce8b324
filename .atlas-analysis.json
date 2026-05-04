@@ -1,24 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Compose Performance Skills",
+  "projectType": "general",
+  "projectName": "Compose Performance Skills",
+  "projectDescription": "A curated library of Agent Skills (SKILL.md files) that teach AI coding agents how to diagnose and fix Jetpack Compose performance issues, covering stability, recomposition, lazy layouts, modifiers, side effects, baseline profiles, and hot reload.",
   "theme": "luma",
-  "colors": {
-    "primary": "#7c7c7c",
-    "light": "#050505",
-    "dark": "#bdbdbd"
-  },
-  "favicon": "https://media.brand.dev/3909aec7-09de-4302-b812-d087be037759.png",
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/skydoves/compose-performance-skills"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/skydoves/compose-performance-skills"
-    }
-  },
+  "primaryColor": "#7c7c7c",
+  "lightColor": "#050505",
+  "darkColor": "#bdbdbd",
   "navigation": {
     "tabs": [
       {
@@ -108,5 +95,46 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "26 focused SKILL.md files covering the full Compose performance loop: Measure, Diagnose, Fix, Verify",
+    "Symptom-to-skill index for rapid lookup by error symptom or API name",
+    "Install script for Claude Code, Android Studio Agent, and Gemini with flat-layout symlinks",
+    "Stability skills: compiler report parsing, stability config, CI enforcement, IDE plugin integration",
+    "Recomposition skills: state deferral, derivedStateOf, strong skipping, subcomposition pitfalls",
+    "Lazy layout skills: stable keys, contentType, LazyLayoutCacheWindow, pausable prefetch",
+    "Modifier skills: Modifier.Node migration, modifier chain ordering",
+    "Side effect skills: collectAsStateWithLifecycle, LaunchedEffect vs RememberedEffect",
+    "Measurement skills: Macrobenchmark, Baseline Profiles, release mode invariants",
+    "Hot Reload skills: Compose HotSwan setup, AI-agent MCP loop, state preservation"
+  ],
+  "publicApiSurface": [
+    "stability/diagnosing-compose-stability/SKILL.md",
+    "stability/stabilizing-compose-types/SKILL.md",
+    "stability/understanding-stability-inference/SKILL.md",
+    "stability/enforcing-stability-in-ci/SKILL.md",
+    "stability/using-stability-analyzer-ide-plugin/SKILL.md",
+    "stability/visualizing-recomposition-cascades/SKILL.md",
+    "recomposition/debugging-recompositions/SKILL.md",
+    "recomposition/deferring-state-reads/SKILL.md",
+    "recomposition/choosing-derivedstateof/SKILL.md",
+    "recomposition/using-strong-skipping-correctly/SKILL.md",
+    "recomposition/avoiding-subcomposition-pitfalls/SKILL.md",
+    "lists/optimizing-lazy-layouts/SKILL.md",
+    "lists/configuring-lazy-prefetch/SKILL.md",
+    "modifiers/migrating-to-modifier-node/SKILL.md",
+    "modifiers/ordering-modifier-chains/SKILL.md",
+    "side-effects/collecting-flows-safely/SKILL.md",
+    "side-effects/using-efficient-effects/SKILL.md",
+    "measurement/generating-baseline-profiles/SKILL.md",
+    "measurement/testing-compose-in-release-mode/SKILL.md",
+    "measurement/tracing-recompositions-at-runtime/SKILL.md",
+    "build/configuring-r8-for-compose/SKILL.md",
+    "audit/auditing-compose-performance/SKILL.md",
+    "hot-reload/setting-up-compose-hotswan/SKILL.md",
+    "hot-reload/understanding-hot-reload-limits/SKILL.md",
+    "hot-reload/preserving-state-across-reloads/SKILL.md",
+    "hot-reload/iterating-with-ai-and-mcp/SKILL.md",
+    "scripts/install-skills.sh"
+  ]
 }

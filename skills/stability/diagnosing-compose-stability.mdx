@@ -1,0 +1,235 @@
+---
+title: "Diagnosing Compose Stability with Compiler Reports"
+description: "Enable Compose Compiler Reports, read composables.txt and classes.txt in release mode, and pinpoint unstable types that block recomposition skipping."
+---
+
+Compose skips recomposition by comparing parameters. When a parameter is unstable, skipping is disabled for the entire composable. The Compose Compiler emits four report files that name exactly which parameters are unstable and why — but only when the build is run in release mode with the correct plugin configuration. This skill walks you through enabling those reports, finding the high-signal entries, and handing off a concrete list of root causes to the fix skill.
+
+## When to use this skill
+
+- You see jank, dropped frames, or scroll stutter and need to identify the cause
+- A `@TraceRecomposition` log shows recomposition counts exceeding the number of meaningful state changes
+- Someone reports "why does this composable recompose so much?"
+- You need evidence that a perf-sensitive composable is actually skippable
+- You want to understand what `classes.txt`, `composables.txt`, `composables.csv`, or `module.json` contain
+- A reviewer asks for proof before merging a performance claim
+
+## Prerequisites
+
+- Kotlin **2.0.0+** with `id("org.jetbrains.kotlin.plugin.compose")` applied to the module
+- A buildable **release** variant — debug builds emit Live Literals which make constants look dynamic and skew every report
+- Optional but recommended: a stability baseline goal, not a 100%-skippable goal — skippability is a diagnostic, not a KPI
+
+## Workflow
+
+<Steps>
+  <Step title="Enable reports in build.gradle.kts">
+    Scope report generation to release only. Debug builds emit misleading data due to Live Literals.
+
+    ```kotlin
+    // app/build.gradle.kts (or any Compose module)
+    plugins {
+        id("com.android.application")
+        id("org.jetbrains.kotlin.android")
+        id("org.jetbrains.kotlin.plugin.compose")
+    }
+
+    composeCompiler {
+        // Only emit reports for release to avoid Live Literals noise.
+        val isReleaseBuild = providers.gradleProperty("composeCompilerReports").orNull == "true"
+        if (isReleaseBuild) {
+            reportsDestination = layout.buildDirectory.dir("compose_compiler")
+            metricsDestination = layout.buildDirectory.dir("compose_compiler")
+        }
+    }
+    ```
+
+    If you want reports on every release build without a flag, use the always-on form:
+
+    ```kotlin
+    composeCompiler {
+        reportsDestination = layout.buildDirectory.dir("compose_compiler")
+        metricsDestination = layout.buildDirectory.dir("compose_compiler")
+        // Optional — opt mutable third-party types into stability:
+        stabilityConfigurationFiles.add(
+            rootProject.layout.projectDirectory.file("stability_config.conf")
+        )
+    }
+    ```
+  </Step>
+
+  <Step title="Build the release variant">
+    Run the release build so Live Literals and interpreted-mode noise are absent.
+
+    ```bash
+    ./gradlew :app:assembleRelease -PcomposeCompilerReports=true
+    ```
+
+    For a library module: `./gradlew :feature-feed:assembleRelease`. The release flavor is required — see the Patterns section for what goes wrong with a debug build.
+  </Step>
+
+  <Step title="Locate the four output files">
+    The plugin writes all four files to `<module>/build/compose_compiler/`:
+
+    ```
+    app/build/compose_compiler/
+    ├── app_release-classes.txt        # per-class stability
+    ├── app_release-composables.txt    # per-composable signatures
+    ├── app_release-composables.csv    # CSV mirror (CI-friendly)
+    └── app_release-module.json        # aggregate counts
+    ```
+
+    If any file is missing, the plugin did not run for that variant. Confirm `composeCompiler { reportsDestination = ... }` is on the correct module and the build was release, not debug.
+  </Step>
+
+  <Step title="Read composables.txt first">
+    This is the highest-signal file. Search for `restartable` entries that are **not** followed by `skippable`. Each one is a recomposition entry point that cannot be skipped. Inside each block, read the per-parameter prefix: `stable`, `unstable`, `@static`, `@dynamic`. Any `unstable` parameter blocks skipping.
+
+    ```text
+    restartable scheme("[androidx.compose.ui.UiComposable]") fun HighlightedSnacks(
+      stable index: Int,
+      unstable snacks: List<Snack>,
+      stable onSnackClick: Function1<Long, Unit>,
+    )
+    ```
+
+    `restartable` with no `skippable` prefix means this composable always recomposes when its parent does. The `unstable snacks: List<Snack>` parameter is the cause.
+  </Step>
+
+  <Step title="Open classes.txt to find the root cause">
+    For every type flagged `unstable` in `composables.txt`, find its declaration in `classes.txt`. The line tells you whether a `var` field, a generic parameter, or an unstable nested type is the cause.
+
+    ```text
+    unstable class CartLine {
+      stable val sku: String
+      unstable val items: List<LineItem>
+    }
+    ```
+
+    The `runtime stable class Box { stable val value: T }` shape means "stable iff the runtime `$stable` field of the substituted T reports stable" — **not** a problem to fix.
+  </Step>
+
+  <Step title="Check module.json for triage numbers">
+    `module.json` contains aggregate counts: skippable composables, restartable composables, stable classes. Use these to compare before and after a fix, or to decide which module to tackle first.
+
+    <Warning>
+      Do not treat these counts as a target. They are a regression sentinel, not a KPI. A composable that runs once at startup does not need to be skippable.
+    </Warning>
+  </Step>
+
+  <Step title="Prioritize by hot path">
+    A non-skippable composable that runs once at startup is irrelevant. One inside a `LazyColumn` item or an animation callback is critical. Cross-reference with `@TraceRecomposition` tracing or Macrobenchmark `FrameTimingMetric` before deciding what to fix.
+  </Step>
+
+  <Step title="Hand off to the fix skill">
+    Produce a list of unstable types and the composables they appear in, then apply the [Stabilizing Compose Types](/skills/stability/stabilizing-compose-types) skill.
+  </Step>
+</Steps>
+
+## Patterns
+
+### Reading a non-skippable composable
+
+```text
+restartable scheme("[androidx.compose.ui.UiComposable]") fun HighlightedSnacks(
+  stable index: Int,
+  unstable snacks: List<Snack>,
+  stable onSnackClick: Function1<Long, Unit>,
+)
+```
+
+Diagnosis:
+1. `restartable` but **not** `skippable` — always recomposes when its parent does
+2. `unstable snacks: List<Snack>` is the cause — `kotlin.collections.List` is an interface; the compiler cannot prove its implementations are immutable
+3. Open `classes.txt` and find `Snack` — if `Snack` itself is `stable`, only the `List` wrapper needs fixing
+
+### Understanding `runtime stable`
+
+```text
+runtime stable class Box {
+  stable val value: T
+}
+```
+
+This is **not** unstable. The compiler emits a synthetic `$stable: Int` field and queries it during composition. The class is stable iff the substituted `T` reports stable at the call site. Do not annotate `runtime` classes with `@Stable` to "promote" them — the runtime check is the correct mechanism.
+
+### Building in debug vs. release
+
+<Tabs>
+  <Tab title="Wrong">
+    ```bash
+    # WRONG
+    ./gradlew :app:assembleDebug
+    ```
+    Debug enables Live Literals. Constant `0.dp` becomes a getter, every literal looks dynamic, and counts in `module.json` drift versus what ships to users.
+  </Tab>
+  <Tab title="Right">
+    ```bash
+    # RIGHT
+    ./gradlew :app:assembleRelease -PcomposeCompilerReports=true
+    ```
+  </Tab>
+</Tabs>
+
+### Reading composables.txt without the leading flags
+
+<Tabs>
+  <Tab title="Wrong">
+    ```text
+    // WRONG — ignoring the prefix flags
+    fun MyScreen(...)
+    ```
+    Skipping the `restartable`/`skippable` prefix discards the only data point that determines whether unstable params actually cost anything.
+  </Tab>
+  <Tab title="Right">
+    ```text
+    // RIGHT — always quote the full prefix and per-param annotations
+    restartable skippable scheme("[androidx.compose.ui.UiComposable]") fun MyScreen(
+      stable user: User,
+      stable onClick: Function0<Unit>,
+    )
+    ```
+  </Tab>
+</Tabs>
+
+### Empty output directory
+
+If `build/compose_compiler/` is missing or empty after a release build:
+
+1. Confirm `org.jetbrains.kotlin.plugin.compose` is applied to **this** module — the extension is per-module
+2. Confirm the build actually compiled Kotlin sources — touch a file or run `./gradlew :app:clean :app:assembleRelease`
+3. Confirm `reportsDestination` is inside `composeCompiler { }`, not inside the legacy `kotlinOptions` block
+
+## Mandatory rules
+
+- **MUST** build the **release** variant — debug builds emit Live Literals that inflate the "unstable" surface area
+- **MUST** read `composables.txt` per-parameter annotations (`stable`/`unstable`/`@static`/`@dynamic`), not just the function name — the flag prefix is the diagnosis
+- **MUST** cross-reference unstable params back to `classes.txt` to identify the root cause (`var`, generic, unstable field type, or interface)
+- **MUST NOT** chase 100% skippability — skippability is a diagnostic, not a KPI; a composable that runs once at startup does not need to be skippable
+- **MUST NOT** annotate a class as `@Stable` based on a report alone — that decision belongs to the fix skill
+- **MUST NOT** read `composables.csv` line counts and call it done — the counts are a regression sentinel; per-line annotations are the actual diagnosis
+
+## Verification
+
+- [ ] `./gradlew :app:assembleRelease` completes successfully with `org.jetbrains.kotlin.plugin.compose` applied
+- [ ] All four files exist under `<module>/build/compose_compiler/`
+- [ ] At least one of: a list of unstable parameter sites copied from `composables.txt`, or a confirmed-zero count from `module.json` justifying no fix is needed
+- [ ] Each unstable parameter has been traced back to a class in `classes.txt` with a concrete root cause (`var`, `List`, `LocalDateTime`, etc.)
+- [ ] You understand that `runtime stable class …` is not a problem — it is the compiler's correct lazy-stability emission
+
+## Related skills
+
+<CardGroup cols={2}>
+  <Card title="Stabilizing Compose Types" href="/skills/stability/stabilizing-compose-types">
+    Fix the unstable types identified here using the three-tier strategy.
+  </Card>
+  <Card title="Understanding Stability Inference" href="/skills/stability/understanding-stability-inference">
+    Explain surprising `runtime`, `unknown`, or `unstable` verdicts from the 12-phase algorithm.
+  </Card>
+  <Card title="Enforcing Stability in CI" href="/skills/stability/enforcing-stability-in-ci">
+    Gate PRs so stability regressions fail the build automatically.
+  </Card>
+  <Card title="Using the Stability Analyzer IDE Plugin" href="/skills/stability/using-stability-analyzer-ide-plugin">
+    Get live in-editor stability feedback without running a Gradle build.
+  </Card>
+</CardGroup>

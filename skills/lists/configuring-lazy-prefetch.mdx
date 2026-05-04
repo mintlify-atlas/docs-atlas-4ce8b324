@@ -1,0 +1,122 @@
+---
+title: "Configuring Lazy Prefetch with LazyLayoutCacheWindow"
+description: "Configure LazyLayoutCacheWindow (Foundation 1.9+) and pausable composition (1.10+) to reduce dropped frames at high scroll velocity on content-heavy lists."
+---
+
+Lazy layouts pre-compose items just outside the viewport so they're ready when the user scrolls. Compose Foundation 1.9 added `LazyLayoutCacheWindow` for configurable ahead/behind extents. Foundation 1.10 made prefetch composition pausable by default — work spreads across multiple frames instead of one. Most apps still rely on legacy single-frame prefetch. This skill covers when to widen the cache window, how to configure nested prefetch, and how to validate the change with Macrobenchmark.
+
+## When to use this skill
+
+- `FrameTimingMetric` from Macrobenchmark shows dropped frames at high scroll velocity even though item composables are skippable.
+- Items are content-heavy: large images, decoded videos, nested grids, or expensive measurement.
+- An outer lazy layout contains items with their own inner lazy layouts (e.g. `LazyColumn` rows each hosting a `HorizontalPager` or inner `LazyRow`).
+- The developer mentions `LazyLayoutCacheWindow`, `NestedPrefetchScope`, "prefetch window", or "pausable composition for prefetch."
+
+## When NOT to use this skill
+
+- Items are cheap and short — default behavior is sufficient. Do not pre-emptively configure a window.
+- Item composables are non-skippable/unstable — fix that first with `/skills/lists/optimizing-lazy-layouts` and `/skills/stability/diagnosing-compose-stability`.
+- The bottleneck is measure or draw rather than composition — prefetch tuning will not help.
+
+## Prerequisites
+
+- Compose Foundation **1.9+** for `LazyLayoutCacheWindow` (`@ExperimentalFoundationApi`).
+- Compose Foundation **1.10+** for pausable composition in prefetch on by default.
+- Item-level hygiene already in place: `key`, `contentType`, stable item composables. Run `optimizing-lazy-layouts` first.
+- Macrobenchmark module with `FrameTimingMetric` set up for before/after comparison.
+
+## Workflow
+
+<Steps>
+  <Step title="Confirm Foundation version and verify pausable prefetch">
+    In `gradle/libs.versions.toml`, verify `androidx.compose.foundation:foundation` is at **1.9.0+** (cache window) or **1.10.0+** (pausable prefetch default). If on 1.10+ and not measuring jank, **stop here** — the default is sufficient for most apps.
+  </Step>
+  <Step title="Validate item-level fixes are in place">
+    Every `items(...)` call has stable `key`, mixed feeds have `contentType`, item composables are skippable. Without this baseline, widening the prefetch window only spreads the same waste over more frames.
+  </Step>
+  <Step title="Measure baseline with Macrobenchmark FrameTimingMetric">
+    Always measure release + R8 + real device. Capture `frameDurationCpuMs` p50/p95/p99 over a fixed scroll journey before changing anything.
+  </Step>
+  <Step title="Construct LazyLayoutCacheWindow after measurement justifies it">
+    Use the top-level factory `LazyLayoutCacheWindow(ahead: Dp, behind: Dp)` and pass it through `rememberLazyListState(cacheWindow = window)`:
+
+    ```kotlin
+    @OptIn(ExperimentalFoundationApi::class)
+    @Composable
+    fun HeavyFeed(items: ImmutableList<HeavyItem>) {
+        val state = rememberLazyListState(
+            cacheWindow = LazyLayoutCacheWindow(ahead = 200.dp, behind = 100.dp)
+        )
+        LazyColumn(state = state) {
+            items(items, key = { it.id }, contentType = { it::class }) { item ->
+                HeavyItemRow(item, Modifier.animateItem())
+            }
+        }
+    }
+    ```
+
+    <Warning>
+      `LazyLayoutCacheWindow` is a parameter on `rememberLazyListState(...)`, NOT on `LazyColumn` / `LazyRow` directly. Every call site requires `@OptIn(ExperimentalFoundationApi::class)`.
+    </Warning>
+  </Step>
+  <Step title="Implement NestedPrefetchScope for items with inner lazy layouts">
+    When a `LazyColumn` row contains a `HorizontalPager` or inner `LazyRow`, implement nested prefetch so the inner layout's first item composes during the outer prefetch slot, not on the user's first horizontal swipe.
+  </Step>
+  <Step title="Re-measure with the same Macrobenchmark journey">
+    Compare `frameDurationCpuMs` p95/p99 before and after. If the rate did not decrease, **revert** and look elsewhere — likely measure or draw dominates.
+  </Step>
+</Steps>
+
+## Patterns
+
+### Default vs configured cache window
+
+```kotlin
+// DEFAULT — fine for most apps with skippable, lightweight items
+val state = rememberLazyListState()
+LazyColumn(state = state) { /* ... */ }
+```
+
+```kotlin
+// CONFIGURED — measured tall, image-heavy items justify a deeper ahead extent
+@OptIn(ExperimentalFoundationApi::class)
+val state = rememberLazyListState(
+    cacheWindow = LazyLayoutCacheWindow(ahead = 200.dp, behind = 100.dp)
+)
+LazyColumn(state = state) { /* ... */ }
+```
+
+### Do not pre-emptively widen the window
+
+```kotlin
+// WRONG — cargo-culted window on a list of lightweight 48dp rows
+@OptIn(ExperimentalFoundationApi::class)
+val state = rememberLazyListState(
+    cacheWindow = LazyLayoutCacheWindow(ahead = 800.dp, behind = 400.dp)
+)
+// WRONG because: increases memory pressure without a profiled benefit.
+// Default window is good enough; measure first.
+```
+
+## Mandatory rules
+
+- **MUST** measure `FrameTimingMetric` before and after any cache window change — on the same device, same release build.
+- **MUST NOT** configure `LazyLayoutCacheWindow` without first fixing item-level `key` and `contentType`.
+- **MUST NOT** widen the window speculatively — it trades memory for composition time only when items are composition-heavy.
+- **MUST** change one variable at a time. Do not combine prefetch tuning with stability fixes in the same PR.
+- **PREFERRED:** on Foundation 1.10+, verify pausable prefetch is active before reaching for a wider cache window.
+
+## Verification
+
+- [ ] Macrobenchmark `FrameTimingMetric` p95/p99 improved over a fixed scroll journey (release + R8 + real device).
+- [ ] Memory usage (`dumpsys meminfo`) did not increase beyond budget (wider window caches more compositions in memory).
+- [ ] Item composables are still `restartable skippable` in `*-composables.txt` — prefetch tuning does not change stability.
+
+<CardGroup cols={2}>
+  <Card title="Optimizing Lazy Layouts" icon="list-ul" href="/skills/lists/optimizing-lazy-layouts">
+    Keys, contentType, and animateItem for smooth scrolling.
+  </Card>
+  <Card title="Generating Baseline Profiles" icon="chart-line" href="/skills/measurement/generating-baseline-profiles">
+    Set up Macrobenchmark for before/after measurement.
+  </Card>
+</CardGroup>

@@ -1,0 +1,173 @@
+---
+title: "Choosing derivedStateOf: Filter Hot Inputs into Cold Outputs"
+description: "Use derivedStateOf when input frequency exceeds output frequency. Covers the remember wrapper, stale non-state capture bug, and snapshotFlow for side effects."
+---
+
+`derivedStateOf` produces a `State` whose readers only invalidate when the **derived result** changes, even if the input states update far more often. The rule is simple: use it when input frequency exceeds output frequency. Use it for any other shape and it is pure overhead — an extra snapshot subscription with no filtering benefit. This skill covers when to reach for it, when to refuse, and how to avoid the canonical stale-capture pitfall.
+
+## When to use this skill
+
+- A scroll position drives a boolean (`firstVisibleItemIndex == 0`, `scrollState.value > threshold`).
+- A high-frequency input (drag delta, animation progress) feeds a low-frequency output (boolean threshold, bucketed integer).
+- An existing `derivedStateOf` is present but recomposition counts did not drop, or the value never updates after the first composition (the stale-capture bug).
+- The developer wants a one-shot side effect when a derived value flips.
+
+## When NOT to use this skill
+
+- The state read is in the wrong phase (`Modifier.alpha(state.value)`). Fix that with `/skills/recomposition/deferring-state-reads` first.
+- Input frequency equals output frequency (e.g. `"$first $last"` from two name states) — `derivedStateOf` is pure overhead; use a direct read or `remember(keys) { }`.
+
+## Prerequisites
+
+- Compose runtime ≥ 1.0 (the API is foundational).
+- Ability to confirm recomposition counts via Layout Inspector or `@TraceRecomposition`.
+
+## Workflow
+
+<Steps>
+  <Step title="Identify input states and output frequency">
+    Write down both update frequencies. Example: `listState.firstVisibleItemIndex` changes every list item scrolled past; the `Boolean` output changes once when the user crosses index 0.
+  </Step>
+  <Step title="Apply the frequency rule">
+    - Input updates **much more often** than output → `derivedStateOf` is the right tool.
+    - Input and output update at roughly the same rate → use a direct read or `remember(input1, input2)`. `derivedStateOf` adds a snapshot subscription for nothing.
+  </Step>
+  <Step title="Wrap in remember { derivedStateOf { } }">
+    A bare `derivedStateOf { }` is re-created on every composition, defeating the cache. The `remember` is mandatory.
+  </Step>
+  <Step title="Add non-state captures as remember keys">
+    Any captured non-state variable (function parameter, local val) is read once at first composition and frozen. Fix: `remember(threshold) { derivedStateOf { … > threshold } }`.
+  </Step>
+  <Step title="Use snapshotFlow for one-shot side effects">
+    For logging, analytics, or snackbar triggers, prefer `snapshotFlow { … }.collect { … }` inside `LaunchedEffect`. It avoids subscribing the composable's restart scope to the derived state.
+  </Step>
+  <Step title="Verify recomposition counts dropped">
+    The consuming composable's count MUST only increment when the derived result changes — not on every input tick.
+  </Step>
+</Steps>
+
+## Patterns
+
+### Scroll-to-top FAB — input frequency >> output frequency
+
+```kotlin
+// WRONG
+val showFab = listState.firstVisibleItemIndex > 0
+// WRONG because: reads firstVisibleItemIndex on every recomposition. The consuming
+// composable invalidates per scrolled item, not just when the boolean flips.
+```
+
+```kotlin
+// RIGHT
+val showFab by remember {
+    derivedStateOf { listState.firstVisibleItemIndex > 0 }
+}
+```
+
+### Pure overhead — input ≈ output
+
+```kotlin
+// WRONG
+val first by remember { mutableStateOf("Ada") }
+val last by remember { mutableStateOf("Lovelace") }
+val fullName by remember { derivedStateOf { "$first $last" } }
+// WRONG because: first and last change at the same rate as fullName.
+// derivedStateOf adds a subscription with zero filtering benefit.
+```
+
+```kotlin
+// RIGHT — direct read
+val fullName = "$first $last"
+```
+
+### Captured non-state variable — the silent stale bug
+
+```kotlin
+// WRONG
+@Composable
+fun Header(threshold: Int, listState: LazyListState) {
+    val isLarge by remember {
+        derivedStateOf { listState.firstVisibleItemIndex > threshold }
+    }
+    // WRONG because: threshold is captured at first composition; later changes are ignored.
+}
+```
+
+```kotlin
+// RIGHT — threshold is a remember key
+@Composable
+fun Header(threshold: Int, listState: LazyListState) {
+    val isLarge by remember(threshold) {
+        derivedStateOf { listState.firstVisibleItemIndex > threshold }
+    }
+}
+```
+
+### One-shot side effect → snapshotFlow
+
+```kotlin
+// WRONG
+@Composable
+fun Feed(listState: LazyListState, onScrolledPastFold: () -> Unit) {
+    val pastFold by remember {
+        derivedStateOf { listState.firstVisibleItemIndex > 5 }
+    }
+    if (pastFold) onScrolledPastFold()
+    // WRONG because: side effects in a composable body can fire multiple times
+    // for the same flip and tie the effect to the composition lifecycle.
+}
+```
+
+```kotlin
+// RIGHT — fire-and-forget via snapshotFlow
+@Composable
+fun Feed(listState: LazyListState, onScrolledPastFold: () -> Unit) {
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex > 5 }
+            .distinctUntilChanged()
+            .filter { it }
+            .collect { onScrolledPastFold() }
+    }
+}
+```
+
+### Bucketing a continuous value
+
+```kotlin
+// RIGHT
+val priceBucket by remember {
+    derivedStateOf {
+        when {
+            cartTotal.value < 10_000 -> Bucket.Small
+            cartTotal.value < 50_000 -> Bucket.Medium
+            else -> Bucket.Large
+        }
+    }
+}
+```
+
+`cartTotal` may tick by single cents; `priceBucket` flips at most twice across the entire range.
+
+## Mandatory rules
+
+- **MUST** wrap every `derivedStateOf` in `remember { … }`. A bare `derivedStateOf { }` provides no filtering.
+- **MUST** add captured non-state variables as `remember` keys.
+- **MUST NOT** use `derivedStateOf` when input and output frequency match.
+- **MUST NOT** wrap `collectAsStateWithLifecycle()` results in `derivedStateOf` "just to be safe" — filter upstream with `.distinctUntilChanged()` instead.
+- **PREFERRED:** `snapshotFlow { … }` over `derivedStateOf` for fire-and-forget side effects.
+
+## Verification
+
+- [ ] Layout Inspector shows the consuming composable recomposes only when the derived result changes.
+- [ ] Every `derivedStateOf` in the file is inside `remember { }` or `remember(keys) { }`.
+- [ ] Every captured non-state variable appears as a `remember` key.
+- [ ] Side effects on derived values run via `LaunchedEffect { snapshotFlow { }.collect { } }`.
+
+<CardGroup cols={2}>
+  <Card title="Deferring State Reads" icon="arrow-down" href="/skills/recomposition/deferring-state-reads">
+    Move hot state reads out of Composition phase.
+  </Card>
+  <Card title="Debugging Recompositions" icon="eye" href="/skills/recomposition/debugging-recompositions">
+    Identify which composable is recomposing and why.
+  </Card>
+</CardGroup>

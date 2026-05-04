@@ -1,81 +1,150 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Get up and running with Compose Performance Skills"
+description: "Install all 26 Compose performance skills into Claude Code, Android Studio Agent mode, or Claude.ai and trigger your first skill with a single prompt."
+keywords: ["install", "setup", "claude code", "android studio", "gemini", "agent skills", "compose performance"]
 ---
 
-## Get started in three steps
+Compose Performance Skills ships 26 `SKILL.md` files organized under nested category folders (`<category>/<slug>/SKILL.md`). Agent runtimes expect a flat layout — one folder per skill, directly inside the skills directory. The bundled `install-skills.sh` script handles the translation: it clones the repository once to a stable location and symlinks each individual skill folder into the flat layout your agent expects. Pick the tab for your runtime below.
 
-Get your documentation site running locally and make your first customization.
+<Tabs>
+  <Tab title="Claude Code">
 
-### Step 1: Set up your local environment
+Claude Code loads skills from `~/.claude/skills/<slug>/SKILL.md`. The install script symlinks each of the 26 skills there.
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
+  <Step title="Clone the repository to a stable location">
+    Clone once to `~/.claude/skills-sources/` so future `git pull` updates do not move the symlink targets.
 
-### Step 2: Deploy your changes
+    ```bash
+    git clone https://github.com/skydoves/compose-performance-skills.git \
+      ~/.claude/skills-sources/compose-performance-skills
+    ```
+  </Step>
+  <Step title="Run the install script">
+    The script creates `~/.claude/skills/` if it does not exist and symlinks each skill folder under its slug.
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    ~/.claude/skills-sources/compose-performance-skills/scripts/install-skills.sh
+    ```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    The script is idempotent — run it again after a `git pull` to pick up new skills without creating duplicate symlinks.
+  </Step>
+  <Step title="Restart Claude Code">
+    Quit and reopen Claude Code. The skills are now active. No further configuration is required.
+  </Step>
+  <Step title="Describe a Compose performance symptom">
+    Type a prompt that mentions a Compose performance symptom. Claude Code matches the trigger vocabulary in the skill frontmatter and loads the relevant `SKILL.md` automatically.
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```
+    My LazyColumn drops frames during fast scroll. Composables show in the
+    layout inspector but recomposition counts spike on every scroll tick.
+    Diagnose the stability issue and fix it.
+    ```
 
-### Step 3: Go live
+    Claude Code matches `dropped frames`, `recomposition counts`, and `LazyColumn` against skill frontmatter and loads `stability/diagnosing-compose-stability/SKILL.md`, which chains into `stability/stabilizing-compose-types/SKILL.md` for the fix.
+  </Step>
+</Steps>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  </Tab>
+  <Tab title="Android Studio / Gemini">
+
+Android Studio Agent mode and Gemini discover skills at runtime by scanning project-local directories. Use the same install script, targeting your project's agent skills directory.
+
+<Steps>
+  <Step title="Navigate to your Android project root">
+    Open a terminal in the root of the Android project where you want the skills available.
+  </Step>
+  <Step title="Clone the repository into your project">
+    Clone into a hidden source directory at the project root. Add it to `.gitignore` so it is not committed.
+
+    ```bash
+    git clone https://github.com/skydoves/compose-performance-skills.git \
+      .compose-performance-skills-source
+    ```
+
+    ```bash
+    echo ".compose-performance-skills-source/" >> .gitignore
+    ```
+  </Step>
+  <Step title="Run the install script targeting the agent skills directory">
+    Pass the target directory as the first argument. The script symlinks each skill under `.agent/skills/<slug>/`.
+
+    ```bash
+    ./.compose-performance-skills-source/scripts/install-skills.sh .agent/skills
+    ```
+  </Step>
+  <Step title="Verify the agent picks up the skills">
+    Open Android Studio and start an Agent mode session. Describe a Compose performance symptom. The agent matches the trigger vocabulary in each skill's frontmatter against your prompt and loads the corresponding `SKILL.md`.
+
+    <Note>
+      End-to-end behavior with Android Studio Agent mode and Gemini has not been independently verified by the author. If you encounter issues, report them at the [issue tracker](https://github.com/skydoves/compose-performance-skills/issues).
+    </Note>
+  </Step>
+</Steps>
+
+  </Tab>
+  <Tab title="Claude.ai / Claude API">
+
+For Claude.ai workspaces and direct Anthropic API integrations, the skills are self-contained and require no install script.
+
+<Steps>
+  <Step title="Locate the relevant SKILL.md files">
+    Browse the repository at [github.com/skydoves/compose-performance-skills](https://github.com/skydoves/compose-performance-skills) or clone it locally. Each skill lives at `<category>/<slug>/SKILL.md`.
+
+    ```bash
+    git clone https://github.com/skydoves/compose-performance-skills.git
+    ```
+  </Step>
+  <Step title="Upload or reference the skill files">
+    **Claude.ai workspaces**: Upload the relevant `SKILL.md` files as Agent Skill attachments in your workspace settings.
+
+    **Anthropic API**: Reference skills inline in the system prompt, or load them through the Agent Skills file API. Attach the `references/` files cited in the skill body alongside the `SKILL.md`.
+  </Step>
+  <Step title="Describe a Compose performance symptom">
+    Start a conversation and describe the symptom. The agent reads the loaded skill and follows its workflow.
+
+    <Tip>
+      You can load multiple skills at once. The skills cross-reference each other — a diagnostic skill names the fix skills it hands off to, so the agent can chain them without guessing.
+    </Tip>
+  </Step>
+</Steps>
+
+  </Tab>
+</Tabs>
+
+## Uninstalling
+
+To remove the symlinks created by the install script, run it with the `--uninstall` flag. Pass the same custom target directory if you used one.
+
+```bash
+# Default target (~/.claude/skills)
+~/.claude/skills-sources/compose-performance-skills/scripts/install-skills.sh --uninstall
+
+# Custom target
+./scripts/install-skills.sh --uninstall .agent/skills
+```
+
+The script removes only the symlinks it created — it does not touch symlinks from other skill libraries.
+
+## Updating the skills
+
+Pull the latest changes from the repository, then run the install script again. It is idempotent and skips slugs that already have a symlink in place.
+
+```bash
+cd ~/.claude/skills-sources/compose-performance-skills
+git pull
+
+# Re-run to link any newly added skills
+./scripts/install-skills.sh
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="How skills work" icon="book-open" href="/how-skills-work">
+    Understand the SKILL.md format, frontmatter triggers, and how agents chain skills automatically.
+  </Card>
+  <Card title="Performance loop" icon="arrows-spin" href="/performance-loop/overview">
+    See how the 26 skills map to the Measure → Diagnose → Fix → Verify loop.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

@@ -1,0 +1,167 @@
+---
+title: "Measure Compose performance before making changes"
+description: "A baseline in release mode on a real device is the only number worth trusting. Learn the APIs and invariants that make Compose measurement honest."
+---
+
+The Measure phase has one job: produce a baseline number that is honest enough to compare against later. That constraint has real teeth. A startup median captured from a debug build can be three to four times higher than the same run in release with R8. A frame timing number from an emulator may not match any device your users actually carry. Before any code changes, you need a number you can defend — and that means release mode, R8 on, and a real physical device.
+
+## Why measurement must happen in release mode
+
+Debug builds lie about performance in two specific, compounding ways.
+
+**Live Literals.** The Live Literals compiler plugin is active in debug builds to support Android Studio's live-edit feature. It wraps every literal value — `0.dp`, `Color.Red`, string constants — in a getter. The Compose recomposer treats these getters as dynamic inputs, which prevents composables from being skipped even when their parameters haven't changed. Recomposition counts are inflated. Compiler reports generated from a debug build reflect this noise and cannot be used as diagnostic evidence.
+
+**Interpreted runtime and no R8.** The Compose UI runtime runs interpreted in debug with JIT warmup spread across the first seconds of the app. R8 in release performs lambda grouping, strips `sourceInformation()` overhead from every recomposition, devirtualizes `ComposerImpl`'s hot call sites, and constant-folds composable arguments. The cited gain from switching debug to release with R8 is roughly **75% faster cold startup** and **60% faster frame render** (source: Ben Trengrove, Android Developers). None of that work happens in debug.
+
+<Warning>
+Never quote a performance number without stating the variant, device, compilation mode, and iteration count. A startup median without "release / R8 on / Pixel 6 / cold start / 10 iterations" is not reviewable. A debug number offered as performance evidence should be immediately rejected.
+</Warning>
+
+## What to measure
+
+Three signals give you the full picture before diagnosis:
+
+| Signal | API | Iterations |
+|---|---|---|
+| Cold startup | `StartupTimingMetric` | ≥ 10 |
+| Scroll frame timing | `FrameTimingMetric` | ≥ 5 |
+| Recomposition counts (release) | `@TraceRecomposition` | Per-session |
+
+**`StartupTimingMetric`** reports `timeToInitialDisplay` and `timeToFullDisplay` (TTFD). TTFD matches user perception — it measures when the screen is meaningfully complete, not just when the first frame was painted. For TTFD to be accurate, the app must call `ReportDrawnWhen { }` from a composable that renders only after meaningful content is available.
+
+**`FrameTimingMetric`** reports `frameDurationCpuMs` percentiles (P50 / P90 / P95 / P99) and `frameOverrunMs` (negative = on time, positive = missed frame deadline). The headline number is **P95 `frameOverrunMs`**: the worst-case missed-deadline frame in the high tail of a scroll. Report medians across iterations, not means — a single thermal-throttled iteration can drag the mean without representing typical behavior.
+
+**`@TraceRecomposition`** from [skydoves/compose-stability-analyzer](https://github.com/skydoves/compose-stability-analyzer) instruments individual composables at the bytecode level and emits recomposition counts to Logcat on a release build. Unlike the Layout Inspector's sampled recomposition overlay — which only works in debug — `@TraceRecomposition` is deterministic and works against a release-with-symbols build.
+
+## Skills in this phase
+
+<CardGroup cols={2}>
+  <Card
+    title="Testing Compose in release mode"
+    icon="flask"
+    href="/skills/measurement/testing-compose-in-release-mode"
+  >
+    Configure the release variant, understand why debug numbers are fiction, and produce measurement-grade numbers.
+  </Card>
+  <Card
+    title="Generating Baseline Profiles"
+    icon="chart-line"
+    href="/skills/measurement/generating-baseline-profiles"
+  >
+    Generate, verify, and measure AOT compilation hint lists with `BaselineProfileRule` and `MacrobenchmarkRule`.
+  </Card>
+</CardGroup>
+
+## Setting up a measurement build
+
+A minimal release variant suitable for Macrobenchmark:
+
+```kotlin
+// app/build.gradle.kts
+android {
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // Debug signing is acceptable for measurement — the build still installs.
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+}
+```
+
+<Tip>
+Use `proguard-android-optimize.txt`, not `proguard-android.txt`. The non-optimize variant disables R8's optimization passes, and the cited 75%/60% gains depend on those passes running. See the [R8 configuration skill](/skills/build/configuring-r8-for-compose) for the full setup.
+</Tip>
+
+## Measuring startup with Macrobenchmark
+
+```kotlin
+@RunWith(AndroidJUnit4::class)
+class StartupBenchmarks {
+    @get:Rule val rule = MacrobenchmarkRule()
+
+    @Test
+    fun coldStartupWithProfile() = rule.measureRepeated(
+        packageName = "com.example",
+        metrics = listOf(StartupTimingMetric()),
+        iterations = 10,
+        startupMode = StartupMode.COLD,
+        compilationMode = CompilationMode.Partial(BaselineProfileMode.Require),
+    ) {
+        pressHome()
+        startActivityAndWait()
+    }
+}
+```
+
+Use `CompilationMode.Partial(BaselineProfileMode.Require)`, not `UseIfAvailable`. `Require` fails the test loudly if the profile is missing or stale; `UseIfAvailable` silently measures an unprofiled build and the developer has no idea.
+
+## Measuring scroll frame timing
+
+```kotlin
+@Test
+fun feedScrollPerformance() = rule.measureRepeated(
+    packageName = "com.example",
+    metrics = listOf(FrameTimingMetric()),
+    iterations = 5,
+    compilationMode = CompilationMode.Partial(BaselineProfileMode.Require),
+) {
+    startActivityAndWait()
+    val feed = device.findObject(By.res("feed"))
+    feed.setGestureMargin(device.displayWidth / 5)
+    feed.fling(Direction.DOWN)
+    feed.fling(Direction.DOWN)
+}
+```
+
+The `setGestureMargin` call keeps fling gestures out of the system gesture area on gesture-navigation devices. Without it, the system may intercept the fling as a back-swipe and the scroll never happens — Macrobenchmark then reports artificially good numbers against an idle screen.
+
+## Wiring ReportDrawn for accurate TTFD
+
+`timeToFullDisplay` is only accurate when the composable that owns the screen's meaningful state calls `ReportDrawnWhen`:
+
+```kotlin
+import androidx.activity.compose.ReportDrawnWhen
+
+@Composable
+fun Feed(state: FeedState) {
+    // TTFD is recorded when items are first non-empty — not on the first (empty) frame.
+    ReportDrawnWhen { state.items.isNotEmpty() }
+    LazyColumn {
+        items(state.items, key = { it.id }) { SnackRow(it) }
+    }
+}
+```
+
+Without this call, `timeToFullDisplay` falls back to `timeToInitialDisplay` and undercounts the time users actually waited for content.
+
+## Device selection
+
+<Tabs>
+  <Tab title="Best: low-end physical device">
+    A Pixel 4a or similar mid-range partner device is the most honest measurement target. High-end flagship devices have thermal headroom and GPU bandwidth that mask real performance problems. The P95 frame overrun on a low-end device reflects what actual users experience.
+  </Tab>
+  <Tab title="Acceptable: Cuttlefish emulator">
+    The `aosp_cf_x86_64_phone-userdebug` Cuttlefish emulator is reproducible and suitable for CI comparisons. It is not representative of real-device GPU and thermal behavior, so do not use Cuttlefish numbers as user-facing performance claims.
+  </Tab>
+  <Tab title="Avoid: stock API emulator">
+    Default Android emulator images are not representative for frame timing. They may produce arbitrarily good or bad frame numbers depending on the host machine's GPU and memory bandwidth. Never use emulator-only numbers as evidence in a performance report.
+  </Tab>
+</Tabs>
+
+## What to record
+
+Record every number before writing a single line of code for the Diagnose phase. The minimum required:
+
+- Cold startup median (≥ 10 iterations), `timeToInitialDisplay` and `timeToFullDisplay`
+- Scroll `FrameTimingMetric` P50 / P90 / P99, `frameDurationCpuMs` and `frameOverrunMs`
+- Device model and API level
+- Variant (`release`), compilation mode (`CompilationMode.Partial(BaselineProfileMode.Require)`)
+- Baseline Profile present: yes / no
+
+These numbers are the only ground truth the rest of the loop has.

@@ -1,0 +1,252 @@
+---
+title: "Visualizing Recomposition Cascades and Live Heatmaps"
+description: "Map recomposition blast radius via the static call-graph cascade view, then stream live counts from ADB logcat as block inlays directly in the IDE editor."
+---
+
+Passive gutter icons answer "is this composable skippable?" ([Using the Stability Analyzer IDE Plugin](/skills/stability/using-stability-analyzer-ide-plugin) covers that). The active investigation tools answer two harder questions: the **Cascade visualizer** walks the static call graph from a root `@Composable` and shows what else might recompose if the root recomposes; the **Live Heatmap** subscribes to the device's logcat and renders actual recomposition counts as block inlays above each instrumented composable in the editor. Together they close the loop between static analysis and runtime evidence.
+
+Both features live inside the same IntelliJ plugin and surface through the right-anchored **Compose Stability Analyzer** tool window, which has three tabs: **Explorer**, **Cascade**, and **Heatmap**.
+
+## When to use this skill
+
+- You ask "what gets dragged in if I change this composable?" — use the **Cascade** tab
+- You ask "how many times did this composable recompose during that scroll?" — use the **Heatmap** tab
+- You are triaging a recomposition spike and need the call-site context around the hot composable
+- You want to measure the blast radius before touching a shared composable
+- Someone mentions the Cascade tab, the Heatmap tab, recomposition inlays, **Analyze Recomposition Cascade**, **Toggle Recomposition Heatmap**, or **Clear Recomposition Data**
+
+## Prerequisites
+
+- The IDEA plugin from [Using the Stability Analyzer IDE Plugin](/skills/stability/using-stability-analyzer-ide-plugin) already installed and the **Compose Stability Analyzer** tool window visible in the right rail
+- **For the Cascade workflow:** nothing extra — pure static analysis on the open project's PSI
+- **For the Heatmap workflow:**
+  - At least one composable annotated with `@TraceRecomposition`
+  - An Android device or emulator connected via ADB
+  - The app installed and running with `ComposeStabilityAnalyzer.setEnabled(true)` in `Application.onCreate`, gated on `BuildConfig.DEBUG` or a dedicated flag
+
+## Workflow A — Cascade Visualizer
+
+<Steps>
+  <Step title="Place the caret inside a @Composable">
+    The **Analyze Recomposition Cascade** action (`com.skydoves.compose.stability.idea.cascade.AnalyzeCascadeAction`) is enabled only when the caret is inside a `@Composable` function body. Right-clicking outside any composable does not offer the action.
+  </Step>
+
+  <Step title="Run the action">
+    Right-click → **Analyze Recomposition Cascade**. The **Compose Stability Analyzer** tool window opens to the **Cascade** tab and renders a tree rooted at the selected function.
+
+    The walk:
+    - Starts from the selected `KtCallExpression` and descends into targets resolved via `resolveMainReference()`
+    - Maximum recursion depth is capped at **10 levels**
+    - Cycle detection uses a visited set of fully qualified names — recursive composables appear once and are not re-expanded
+    - Each node carries a stability badge from the same engine that drives the gutter icons
+  </Step>
+
+  <Step title="Walk and triage the tree">
+    For each node:
+
+    - Read the stability badge — a red node downstream of the root means recomposing the root will recompose that subtree without skipping
+    - Double-click a node to navigate to its source
+    - For high-fan-out branches, prune by stabilizing parameters ([Stabilizing Compose Types](/skills/stability/stabilizing-compose-types)) or by deferring state reads inside hot leaves
+  </Step>
+
+  <Step title="Treat the cascade as a static estimate">
+    The cascade is a **static** call-graph walk. Whether each downstream node actually recomposes at runtime depends on stability and skip decisions made by the compiler and runtime. Confirm with the live heatmap (Workflow B) before drawing conclusions about real cost.
+  </Step>
+</Steps>
+
+## Workflow B — Live Heatmap
+
+<Steps>
+  <Step title="Annotate target composables with @TraceRecomposition">
+    The heatmap is fed by logcat lines emitted by `@TraceRecomposition`. Without instrumented composables, no inlays appear. Use the **Add @TraceRecomposition** intention from Alt+Enter inside any composable, or add the annotation manually.
+
+    ```kotlin
+    @TraceRecomposition(traceStates = true)
+    @Composable
+    fun PriceTicker(price: Price) {
+        Text(price.formatted)
+    }
+    ```
+  </Step>
+
+  <Step title="Run the app and confirm logcat output">
+    Run a debug build on the connected device. Open the **Logcat** tool window and filter on tag `Recomposition`. Confirm `D/Recomposition` lines stream in. The exact format the plugin parses:
+
+    ```text
+    [Recomposition #3] UserProfile (tag: user-screen) (2.30ms)
+      ├─ [param] user: User changed (User@abc123 → User@def456)
+      ├─ [param] count: Int stable (42)
+      ├─ [state] counter: Int changed (5 → 6)
+      └─ Unstable parameters: [user]
+    ```
+
+    If no log lines appear, the runtime is misconfigured — `ComposeStabilityAnalyzer.setEnabled(true)` must be called before using the heatmap.
+  </Step>
+
+  <Step title="Toggle the heatmap on">
+    Right-click in the editor → **Toggle Recomposition Heatmap** (action id `com.skydoves.compose.stability.idea.heatmap.ToggleHeatmapAction`). The action also lives under the **Code** menu.
+
+    The plugin's `AdbLogcatService` spawns this ADB command:
+
+    ```bash
+    adb logcat -s Recomposition:D -T 1
+    ```
+
+    `-s Recomposition:D` filters to the tag at debug level; `-T 1` starts from the most recent line. If multiple devices are connected, a popup chooser appears.
+  </Step>
+
+  <Step title="Read the block inlays">
+    `HeatmapInlayManager` places block inlays above each `@Composable` declaration that has streamed at least one event. Each inlay shows:
+
+    - The recomposition count since the heatmap was toggled on (or since the last **Clear Recomposition Data**)
+    - A color-coded background reflecting the relative heat
+
+    Click an inlay to switch the tool window to the **Heatmap** tab and focus that composable's event history. Hover an inlay for a 5-second tooltip with the latest data.
+  </Step>
+
+  <Step title="Reset accumulated counts between scenarios">
+    Run **Code → Clear Recomposition Data** (action id `com.skydoves.compose.stability.idea.heatmap.ClearHeatmapDataAction`) to reset counters between scenarios — for example, when comparing a list scroll vs. a search filter without restarting the app.
+  </Step>
+
+  <Step title="Toggle off before measurement">
+    Toggle the heatmap off before running Macrobenchmark or Baseline Profile generation. The heatmap drives logcat I/O and PSI work on every recomposition — leaving it on will skew `FrameTimingMetric` results.
+  </Step>
+</Steps>
+
+## Tool window structure
+
+| Tab | Purpose |
+|---|---|
+| **Explorer** | Hierarchical tree by module → package → file → composable with stability badges. Use as the survey view before drilling into Cascade or Heatmap. |
+| **Cascade** | Populated when **Analyze Recomposition Cascade** runs. Shows the static call-graph tree from the selected root. |
+| **Heatmap** | Populated when the live heatmap is toggled on. Shows the live event log per composable. |
+
+Start every investigation from the **Explorer** tab; drop into **Cascade** for a target; enable the **Heatmap** to confirm.
+
+## Patterns
+
+### Heatmap with no `@TraceRecomposition` produces no inlays
+
+<Tabs>
+  <Tab title="Wrong">
+    ```text
+    1. Toggle Recomposition Heatmap on.
+    2. ADB connects, logcat reader starts.
+    3. Scroll the screen aggressively.
+    4. No inlays appear.
+    5. Developer concludes "the heatmap is broken".
+    ```
+    The heatmap is fed by logcat lines emitted by `@TraceRecomposition`. Without at least one instrumented composable there is nothing to render.
+  </Tab>
+  <Tab title="Right">
+    ```kotlin
+    // Instrument first, then toggle the heatmap
+    @TraceRecomposition(traceStates = true)
+    @Composable
+    fun PriceTicker(price: Price) {
+        Text(price.formatted)
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### Do not run the heatmap during Macrobenchmark
+
+<Tabs>
+  <Tab title="Wrong">
+    ```text
+    1. Open a Macrobenchmark scroll journey.
+    2. Toggle Recomposition Heatmap on (forgotten from earlier session).
+    3. Run the benchmark.
+    4. FrameTimingMetric numbers regress vs. baseline.
+    ```
+    The heatmap drives logcat I/O and PSI updates on every recomposition. That overhead skews release-grade timing measurements.
+  </Tab>
+  <Tab title="Right">
+    ```text
+    1. Toggle Recomposition Heatmap off (verify no inlays in editor).
+    2. Run the Macrobenchmark journey.
+    3. Compare FrameTimingMetric vs. the committed baseline.
+    ```
+  </Tab>
+</Tabs>
+
+### Do not trust the cascade as a runtime guarantee
+
+<Tabs>
+  <Tab title="Wrong">
+    ```text
+    Cascade from PriceTicker shows 12 downstream composables.
+    Developer concludes "all 12 will recompose every tick" and refactors all 12.
+    ```
+    The cascade is a static call-graph walk. Several of the 12 may already be skipping today; refactoring them is wasted work.
+  </Tab>
+  <Tab title="Right">
+    ```text
+    1. Analyze Recomposition Cascade from PriceTicker → 12 nodes flagged.
+    2. Annotate the top 3 (by suspected hotness) with @TraceRecomposition.
+    3. Toggle Recomposition Heatmap on, run a representative scenario.
+    4. Inlays show 2 nodes with high counts; the other 10 stayed cold.
+    5. Fix the 2 hot nodes via stabilizing-compose-types.
+    6. Toggle the heatmap off; re-measure with Macrobenchmark.
+    ```
+  </Tab>
+</Tabs>
+
+### Prune cascade branches by stabilizing types, not by wrapping with `key`
+
+<Tabs>
+  <Tab title="Wrong">
+    ```text
+    Cascade shows a wide subtree; developer wraps every leaf in key { ... }
+    to force isolation.
+    ```
+    `key` does not make an unstable parameter stable. The leaves still receive unstable arguments and the parent still recomposes them.
+  </Tab>
+  <Tab title="Right">
+    ```text
+    Identify the unstable parameter via the cascade node's stability badge.
+    Stabilize the type at its declaration site per stabilizing-compose-types.
+    Re-run the cascade to confirm the badge flipped to stable.
+    ```
+  </Tab>
+</Tabs>
+
+## Mandatory rules
+
+- **MUST** annotate target composables with `@TraceRecomposition` before toggling the heatmap — without it, the logcat stream is empty and no inlays render
+- **MUST** toggle the heatmap off before running Macrobenchmark or Baseline Profile generation — logcat overhead skews timing
+- **MUST NOT** ship `ComposeStabilityAnalyzer.setEnabled(true)` in production — gate on `BuildConfig.DEBUG` or a dedicated flag
+- **MUST NOT** read the cascade as a runtime guarantee — it is a static blast-radius estimate; confirm with the heatmap before refactoring
+- **MUST NOT** chase a green cascade as a goal — some downstream nodes legitimately need to recompose
+- **PREFERRED:** start every investigation from the **Explorer** tab, drop into **Cascade** for a target, then enable the **Heatmap** to confirm
+- **PREFERRED:** run **Clear Recomposition Data** between scenarios instead of restarting the app
+
+## Verification
+
+- [ ] Right-clicking inside a `@Composable` shows **Analyze Recomposition Cascade**; right-clicking outside any composable does not
+- [ ] The Cascade tab populates with a tree rooted at the selected function and stops expanding at depth 10 or at cycles
+- [ ] Double-clicking a cascade node navigates to that composable's source
+- [ ] **Toggle Recomposition Heatmap** prompts a device picker when more than one device is connected, and auto-starts when only one is connected
+- [ ] With the heatmap on and `@TraceRecomposition` applied, `D/Recomposition` lines appear in **Logcat** and block inlays appear above matching composable declarations
+- [ ] Clicking an inlay switches the tool window to the **Heatmap** tab and focuses that composable
+- [ ] Hovering an inlay shows a 5-second tooltip with the latest data
+- [ ] **Clear Recomposition Data** resets accumulated counts and inlays
+- [ ] Toggling the heatmap action again stops the ADB logcat reader
+
+## Related skills
+
+<CardGroup cols={2}>
+  <Card title="Using the Stability Analyzer IDE Plugin" href="/skills/stability/using-stability-analyzer-ide-plugin">
+    Set up the IDE plugin that this skill's features depend on.
+  </Card>
+  <Card title="Stabilizing Compose Types" href="/skills/stability/stabilizing-compose-types">
+    Fix the unstable types that the cascade and heatmap identify as hot.
+  </Card>
+  <Card title="Diagnosing Compose Stability" href="/skills/stability/diagnosing-compose-stability">
+    Generate the compiler reports that explain why cascade nodes are red.
+  </Card>
+  <Card title="Enforcing Stability in CI" href="/skills/stability/enforcing-stability-in-ci">
+    Lock in heatmap-confirmed fixes so they cannot regress in future PRs.
+  </Card>
+</CardGroup>

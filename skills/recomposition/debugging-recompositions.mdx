@@ -1,0 +1,157 @@
+---
+title: "Debugging Recompositions with Layout Inspector"
+description: "Use Layout Inspector counts, Argument Change Reasons, and @TraceRecomposition to identify which composable and parameter is causing excess recomposition."
+---
+
+Recomposition is invisible by default. A composable that re-runs sixty times a second looks identical in source to one that should never recompose. This skill exposes three diagnostic layers — **Layout Inspector** recomposition counts and skip counts, **Argument Change Reasons** (Android Studio Hedgehog+), and **`@TraceRecomposition`** from `compose-stability-analyzer` — and maps each status to the correct fix skill.
+
+## When to use this skill
+
+- The developer says "this should be skipping but it's not" or "this re-runs every parent tick."
+- Recomposition counts need to be confirmed after a stability or strong-skipping fix.
+- The developer asks what "Uncertain," "Unknown," "Static," or "Unchanged" means in the Argument Change Reasons panel.
+- A PR claims a fix worked; you need release-mode confirmation.
+
+## When NOT to use this skill
+
+- The cause is an unstable type — fix with `/skills/stability/diagnosing-compose-stability` and `/skills/stability/stabilizing-compose-types`.
+- The cause is lambda capture — fix with `/skills/recomposition/using-strong-skipping-correctly`.
+- The cause is a state read in the wrong phase — fix with `/skills/recomposition/deferring-state-reads`.
+
+## Prerequisites
+
+- Android Studio **Hedgehog (2023.1.1)** or later for Argument Change Reasons. Earlier versions show counts but not the per-parameter reason panel.
+- A **debug** build for Layout Inspector. Treat counts as directional — debug runs interpreted with Live Literals.
+- For release-mode confirmation: `compose-stability-analyzer` runtime with `ComposeStabilityAnalyzer.setEnabled(true)` in `Application.onCreate`.
+
+## Workflow
+
+<Steps>
+  <Step title="Enable recomposition counts in Layout Inspector">
+    Run the app in debug. Open **Tools → Layout Inspector**. Toggle both:
+
+    - **Show recomposition counts** — adds a Recompositions column and badge overlay.
+    - **Show recomposition skip counts** — shows how many times the skip guard fired.
+
+    A healthy composable shows skips ≫ recompositions. A composable at `100/0` (100 recompositions, 0 skips) is the smoking gun.
+  </Step>
+  <Step title="Reproduce the symptom and watch counts">
+    Reset counts via the Layout Inspector **Reset** button. Perform the user action (scroll, animation, tap) and watch which composable's count climbs disproportionately. Note its name and parameter list.
+  </Step>
+  <Step title="Inspect Argument Change Reasons">
+    Click the suspect composable. The right-hand panel shows a **Recomposition reasons** section. Each parameter has one of five statuses:
+
+    | Status | Meaning | Action |
+    |---|---|---|
+    | **Static** | Compile-time constant | None — not the cause |
+    | **Unchanged** | Value compared equal | None — not the cause |
+    | **Changed** | Value compared not-equal | Check if the change was meaningful or a spurious `copy()` |
+    | **Uncertain** | Type is unstable; runtime used `===`, comparison inconclusive | Stabilize the type — see `/skills/stability/stabilizing-compose-types` |
+    | **Unknown** | Compiler could not classify the type | Run `/skills/stability/diagnosing-compose-stability` |
+  </Step>
+  <Step title="Map status to the correct fix skill">
+    - **Changed**: check if `copy()` produces structurally-equal-but-identity-different objects, or if a `Flow` emits equal values without `distinctUntilChanged()`.
+    - **Uncertain**: annotate the type or use a stable collection (`ImmutableList<T>`).
+    - **Unknown**: run the stability diagnosis to find why the type is unclassified.
+    - **Static / Unchanged**: the cause is elsewhere — check sibling parameters or the parent restart scope.
+  </Step>
+  <Step title="Confirm in release with @TraceRecomposition">
+    Debug counts are directional only. Instrument the suspect composable and run in **release + R8 + real device**:
+
+    ```kotlin
+    @TraceRecomposition(traceStates = true)
+    @Composable
+    fun SnackRow(snack: Snack, onClick: (Long) -> Unit) { /* ... */ }
+    ```
+
+    ```bash
+    adb logcat -s Recomposition:D
+    ```
+
+    The logcat output is the ground truth. Quote the release-mode count — not the debug count — when reporting a fix worked.
+  </Step>
+</Steps>
+
+## Patterns
+
+### Do not draw conclusions from debug counts alone
+
+```text
+// WRONG
+"Layout Inspector shows SnackRow at 100/0 in debug — fix shipped."
+// WRONG because: debug runs interpreted with Live Literals. The same composable in release
+// + R8 may run 5/95. Always confirm with @TraceRecomposition in release.
+```
+
+```text
+// RIGHT
+"Layout Inspector showed SnackRow at 100/0 in debug. After the fix, debug shows 5/95
+and release @TraceRecomposition confirms 0 recompositions across a 30-frame scroll."
+```
+
+### Name the status before acting
+
+```text
+// WRONG
+"FilterBar recomposes too much. I'll mark Filter @Stable."
+// WRONG because: the Argument Change Reason was not named. If the status is Unknown
+// the fix is different from Uncertain, which is different from Changed.
+```
+
+```text
+// RIGHT
+"FilterBar recomposes per-frame. param `filter` is Uncertain. Filter holds List<String>;
+replace with ImmutableList<String> + @Immutable. Confirm with @TraceRecomposition in release."
+```
+
+### Fix the @Immutable contract violation
+
+```kotlin
+// WRONG — @Immutable but the field is mutable
+@Immutable
+data class Filter(val tags: List<String>, val sort: SortOrder)
+// WRONG because: List<String> is unstable; @Immutable contract is broken.
+// Layout Inspector reports `filter` as Uncertain on every recompose.
+```
+
+```kotlin
+// RIGHT
+@Immutable
+data class Filter(val tags: ImmutableList<String>, val sort: SortOrder)
+```
+
+### Use the skip ratio, not the raw count
+
+A composable at `0/0` is unreachable. At `100/0` it is broken. At `100/95` it is healthy — five real recompositions out of one hundred parent ticks. Track the skip-to-recomposition ratio over time.
+
+## Mandatory rules
+
+- **MUST** name the Argument Change Reason status when reporting a finding. "It recomposes a lot" is not a finding.
+- **MUST NOT** treat debug Layout Inspector counts as ground truth. Confirm in release with `@TraceRecomposition`.
+- **MUST** reset Layout Inspector counts before reproducing the scenario.
+- **MUST** map each status to the correct sibling skill.
+- **MUST NOT** ignore "Uncertain" — it is the most common smoking gun for a broken `@Immutable` contract.
+
+## Verification
+
+- [ ] Layout Inspector "Show recomposition counts" and "Show recomposition skip counts" both toggled on.
+- [ ] Counts reset before reproducing the scenario.
+- [ ] Suspect composable identified by disproportionate count growth.
+- [ ] Argument Change Reason status named per-parameter in the report.
+- [ ] Status mapped to the correct fix skill.
+- [ ] `@TraceRecomposition` in release + R8 confirms the post-fix recomposition count.
+
+<CardGroup cols={2}>
+  <Card title="Deferring State Reads" icon="arrow-down" href="/skills/recomposition/deferring-state-reads">
+    Move state reads out of Composition into Layout or Draw.
+  </Card>
+  <Card title="Diagnosing Compose Stability" icon="magnifying-glass" href="/skills/stability/diagnosing-compose-stability">
+    Read compiler reports to find unstable types.
+  </Card>
+  <Card title="Tracing Recompositions at Runtime" icon="wave-square" href="/skills/measurement/tracing-recompositions-at-runtime">
+    Set up @TraceRecomposition for release-mode confirmation.
+  </Card>
+  <Card title="Using Strong Skipping Correctly" icon="shield" href="/skills/recomposition/using-strong-skipping-correctly">
+    Understand how strong skipping affects lambda memoization.
+  </Card>
+</CardGroup>

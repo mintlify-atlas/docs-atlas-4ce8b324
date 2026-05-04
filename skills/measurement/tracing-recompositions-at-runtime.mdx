@@ -1,0 +1,132 @@
+---
+title: "Tracing Recompositions at Runtime with @TraceRecomposition"
+description: "Add @TraceRecomposition from compose-stability-analyzer for per-recomposition logcat diffs in release builds and a live IDE heatmap with count thresholds."
+---
+
+Layout Inspector counts recompositions in debug builds, where Live Literals and the interpreted Compose runtime inflate counts. `@TraceRecomposition` from `skydoves/compose-stability-analyzer` instruments a composable at compile time and emits per-recomposition diffs — which state or parameter changed, and the value transition — to logcat under the `Recomposition` tag. The instrumentation works in any build the developer enables it for, including release-with-debug-symbols, and feeds the IntelliJ/Android Studio plugin's live recomposition heatmap (green under 10, yellow 10–50, red 50+).
+
+## When to use this skill
+
+- A composable recomposes more than expected and Layout Inspector counts are inconclusive.
+- A stability or strong-skipping fix needs to be confirmed against a release-equivalent build before merging.
+- A developer wants per-parameter change diffs printed inline rather than clicking through the Layout Inspector tree.
+- The team wants to baseline a composable's recomposition count for a performance SLO.
+
+## When NOT to use this skill
+
+- Just need recomposition counts in debug — Layout Inspector is faster to set up.
+- The build is a **production release** with no diagnosis intent — the instrumentation must be gated off.
+- The need is end-to-end frame timing or startup — use `generating-baseline-profiles` with `MacrobenchmarkRule`.
+
+## Prerequisites
+
+- Gradle plugin `com.github.skydoves.compose.stability.analyzer` (v0.7.3+) added to the module.
+- An `Application` subclass in the manifest for the runtime toggle in `onCreate()`.
+- `org.jetbrains.kotlin.plugin.compose` applied (Kotlin 2.0+).
+- A `BuildConfig` field or feature flag the runtime toggle can read.
+
+## Workflow
+
+<Steps>
+  <Step title="Apply the Gradle plugin">
+    ```kotlin
+    // module/build.gradle.kts
+    plugins {
+        id("com.android.application")
+        id("org.jetbrains.kotlin.android")
+        id("org.jetbrains.kotlin.plugin.compose")
+        alias(libs.plugins.compose.stability.analyzer)
+    }
+    ```
+
+    In `gradle/libs.versions.toml`:
+    ```toml
+    [versions]
+    composeStabilityAnalyzer = "0.7.3"
+
+    [plugins]
+    compose-stability-analyzer = { id = "com.github.skydoves.compose.stability.analyzer", version.ref = "composeStabilityAnalyzer" }
+    ```
+  </Step>
+  <Step title="Add the runtime dependency">
+    ```kotlin
+    dependencies {
+        // runtime tracing artifact (not the Gradle plugin)
+        debugImplementation("com.github.skydoves:compose-stability-analyzer:<version>")
+    }
+    ```
+  </Step>
+  <Step title="Enable the runtime in Application.onCreate()">
+    ```kotlin
+    class MyApp : Application() {
+        override fun onCreate() {
+            super.onCreate()
+            // Gate: off in production, on for diagnosis builds
+            ComposeStabilityAnalyzer.setEnabled(BuildConfig.DEBUG)
+        }
+    }
+    ```
+
+    For a production-style profiling APK, use a custom flag:
+    ```kotlin
+    ComposeStabilityAnalyzer.setEnabled(BuildConfig.ENABLE_RECOMPOSITION_TRACE)
+    ```
+  </Step>
+  <Step title="Annotate the suspect composable">
+    ```kotlin
+    @TraceRecomposition(traceStates = true)
+    @Composable
+    fun SnackRow(snack: Snack, onClick: (Long) -> Unit) {
+        // ...
+    }
+    ```
+
+    - `traceStates = true` — also traces `State<T>` reads inside the composable body (not just parameters).
+    - Without `traceStates`, only parameter changes are logged.
+  </Step>
+  <Step title="Capture the logcat output">
+    ```bash
+    adb logcat -s Recomposition:D
+    ```
+
+    Each recomposition prints one line identifying the composable and the changed parameter. Example output:
+
+    ```
+    D/Recomposition: [SnackRow #3] snack changed: Snack(id=42, name="Donut") → Snack(id=42, name="Eclair")
+    ```
+
+    After the fix, expect:
+    ```
+    D/Recomposition: [SnackRow #1]  (initial composition only, no further entries during scroll)
+    ```
+  </Step>
+  <Step title="Install the IDE plugin for the live heatmap (optional)">
+    Install the **Compose Stability Analyzer** plugin from the JetBrains marketplace. With `ComposeStabilityAnalyzer.setEnabled(true)` and a connected device, the plugin shows a live heatmap overlay in the IDE:
+
+    - Green: < 10 recompositions per observation window
+    - Yellow: 10–50
+    - Red: > 50
+  </Step>
+</Steps>
+
+## Mandatory rules
+
+- **MUST** gate `ComposeStabilityAnalyzer.setEnabled(true)` behind `BuildConfig.DEBUG` or an equivalent flag — never leave tracing on in production.
+- **MUST NOT** quote debug Layout Inspector counts as the final number — quote the `@TraceRecomposition` release-build logcat count instead.
+- **PREFERRED:** `traceStates = true` when the composable reads from `mutableStateOf` or `collectAsStateWithLifecycle` inside its body.
+- **PREFERRED:** remove `@TraceRecomposition` annotations before shipping the production release, or move the dependency to `debugImplementation` only.
+
+## Verification
+
+- [ ] `adb logcat -s Recomposition:D` shows entries for the annotated composable during the user journey.
+- [ ] After the fix: logcat shows exactly one `[ComposableName #1]` entry (initial composition) and zero during the hot path.
+- [ ] `ComposeStabilityAnalyzer.setEnabled(...)` is gated behind a debug/feature flag — confirmed by grep.
+
+<CardGroup cols={2}>
+  <Card title="Debugging Recompositions" icon="eye" href="/skills/recomposition/debugging-recompositions">
+    Layout Inspector and Argument Change Reasons for debug-mode diagnosis.
+  </Card>
+  <Card title="Enforcing Stability in CI" icon="shield-check" href="/skills/stability/enforcing-stability-in-ci">
+    Gate future regressions with the stabilityCheck Gradle task.
+  </Card>
+</CardGroup>

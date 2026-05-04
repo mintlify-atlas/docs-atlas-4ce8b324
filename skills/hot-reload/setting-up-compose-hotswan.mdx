@@ -1,0 +1,98 @@
+---
+title: "Setting Up Compose HotSwan for Sub-Second Hot Reload"
+description: "Install Compose HotSwan: JetBrains plugin, Gradle compiler plugin, and hotSwanCompiler DSL. Verify the first save-to-reload round-trip in under one second."
+---
+
+Compose HotSwan is a JetBrains IDE plugin plus a Gradle compiler plugin that swaps changed Kotlin classes into a running Compose app on a real device or emulator in under one second, preserving navigation, scroll, and `remember` state. This skill installs both pieces, wires the canonical Gradle DSL with `debugOnly = true`, and verifies the first save-to-reload round-trip.
+
+## When to use this skill
+
+- The developer mentions HotSwan, hot reload, instant UI update, "save and see," "no rebuild," or fast Compose iteration on device.
+- A team is onboarding a new project to HotSwan and wants the canonical wiring.
+- The developer has the IDE plugin installed and asks how to apply the Gradle compiler plugin.
+
+## When NOT to use this skill
+
+- Questions about which changes hot-reload vs force a rebuild — see `/skills/hot-reload/understanding-hot-reload-limits`.
+- Questions about state preservation across reloads — see `/skills/hot-reload/preserving-state-across-reloads`.
+- Questions about JetBrains' Live Edit or Apply Changes — these are separate products.
+
+## Prerequisites
+
+- Android Studio 2024.3+ or IntelliJ IDEA 2024.3+.
+- Kotlin 2.0+ with `org.jetbrains.kotlin.plugin.compose` already applied on Compose modules.
+- Gradle 8+.
+- A real device or emulator with USB debugging enabled and visible to `adb devices`.
+- The HotSwan IDE plugin installed from the JetBrains Marketplace.
+
+## Workflow
+
+<Steps>
+  <Step title="Install the IDE plugin">
+    Open **Settings / Preferences → Plugins → Marketplace** and search for **Compose HotSwan**. Install and restart.
+
+    After restart, a **HotSwan** tool window appears in the right sidebar. It shows `NOT CONNECTED` until a debug session with the Gradle plugin attached is running.
+  </Step>
+  <Step title="Declare the Gradle plugin in libs.versions.toml">
+    ```toml
+    [plugins]
+    hotswan-compiler = { id = "com.github.skydoves.compose.hotswan.compiler", version = "1.2.10" }
+    ```
+
+    The plugin id is `com.github.skydoves.compose.hotswan.compiler` exactly. Check the HotSwan releases page for newer stable versions.
+  </Step>
+  <Step title="Apply at the root build.gradle.kts with apply false">
+    ```kotlin
+    // root build.gradle.kts
+    plugins {
+        alias(libs.plugins.hotswan.compiler) apply false
+    }
+    ```
+  </Step>
+  <Step title="Apply and configure in the app module">
+    ```kotlin
+    // app/build.gradle.kts
+    plugins {
+        alias(libs.plugins.android.application)
+        alias(libs.plugins.kotlin.android)
+        alias(libs.plugins.kotlin.compose)
+        alias(libs.plugins.hotswan.compiler)
+    }
+
+    hotSwanCompiler {
+        enabled = true
+        debugOnly = true   // MUST be true; never run HotSwan instrumentation in a release build
+    }
+    ```
+
+    <Warning>
+      `debugOnly = true` is mandatory. The HotSwan instrumentation adds a background TCP server; shipping it in release exposes an unauthenticated local endpoint on the user's device.
+    </Warning>
+  </Step>
+  <Step title="Run the app and verify">
+    Run the app on a connected device with **Run → Debug** (not Run). The HotSwan tool window transitions from `NOT CONNECTED` → `CONNECTING` → `WATCHING`.
+
+    Make a visible change inside a composable body — for example, change a `Text("Hello")` to `Text("Hello HotSwan")`. Save the file. The device should update in under one second without a rebuild.
+  </Step>
+</Steps>
+
+## Mandatory rules
+
+- **MUST** set `debugOnly = true` in `hotSwanCompiler { }`. Never ship HotSwan instrumentation in a release build.
+- **MUST** start the app with **Debug** (not Run) to establish the HotSwan connection.
+- **MUST NOT** confuse HotSwan with Android Studio Live Edit or Apply Changes — they are separate products with different supported change sets.
+
+## Verification
+
+- [ ] HotSwan tool window status is `WATCHING` with the app running.
+- [ ] A composable body change (text, color, layout) updates the device in under one second without a rebuild.
+- [ ] The release variant does not include HotSwan instrumentation (`debugOnly = true` confirmed).
+
+<CardGroup cols={2}>
+  <Card title="Understanding Hot Reload Limits" icon="triangle-exclamation" href="/skills/hot-reload/understanding-hot-reload-limits">
+    Which changes hot-reload and which force a rebuild.
+  </Card>
+  <Card title="Preserving State Across Reloads" icon="floppy-disk" href="/skills/hot-reload/preserving-state-across-reloads">
+    Keep scroll, dialog, and remember state alive across reload tiers.
+  </Card>
+</CardGroup>

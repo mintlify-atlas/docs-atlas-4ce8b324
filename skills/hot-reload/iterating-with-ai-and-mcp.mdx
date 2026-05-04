@@ -1,0 +1,144 @@
+---
+title: "Iterating with AI and MCP: Agent-Driven Compose Hot Reload"
+description: "Use seven HotSwan MCP tools to let an AI agent edit Kotlin, trigger hot reloads, screenshot the device, and iterate without human input."
+---
+
+Compose HotSwan ships an embedded HTTP MCP server inside the IntelliJ plugin. Any MCP-compatible AI client — Claude Code, Cursor, or any tool that speaks Model Context Protocol — can call its tools to drive the iteration loop. The agent edits a Kotlin file, calls `hotswan_reload`, captures a screenshot of the running device, evaluates the result against the design intent, and decides the next change. Cycle time is a few seconds per iteration, so the agent can converge on a UI tweak without a human steering each step.
+
+## When to use this skill
+
+- The developer wants AI-driven UI iteration: "tune this screen until it matches the mock."
+- The developer wants the AI to verify its own edits visually instead of guessing whether the change worked.
+- Wiring a Claude Code or Cursor workflow that needs MCP tool access to a running app.
+- The user mentions "MCP server," "hotswan_reload," "hotswan_take_screenshot," "agent loop," or "snapshot rollback."
+
+## When NOT to use this skill
+
+- Pure code review with no runtime feedback.
+- Release-grade visual regression testing — use Macrobenchmark + screenshot diff, not HotSwan snapshots.
+- The change would force a full rebuild — read `/skills/hot-reload/understanding-hot-reload-limits` first.
+- Reloads keep escalating and losing state — fix that with `/skills/hot-reload/preserving-state-across-reloads` before adding an autonomous loop.
+
+## Prerequisites
+
+- Compose HotSwan installed with tool window status `WATCHING`.
+- The target app is running on a connected device or emulator.
+- An MCP-capable AI client (Claude Code, Cursor) pointed at the HotSwan plugin's HTTP MCP endpoint.
+
+## The seven MCP tools
+
+The HotSwan MCP server exposes exactly these seven tools. The agent **must not** invent additional tool names.
+
+| Tool | Purpose |
+|---|---|
+| `hotswan_get_status()` | Returns device, app, and watcher state. Call at the start of every loop. |
+| `hotswan_reload(filePaths)` | Explicit reload trigger. Returns the tier (1/2/3) that ran. |
+| `hotswan_take_screenshot()` | Captures the current device screen. Returns image bytes or a path. |
+| `hotswan_start_snapshot()` | Begins a snapshot session — auto-captures after every reload for rollback. |
+| `hotswan_stop_snapshot()` | Ends the snapshot session and finalizes the history. |
+| `hotswan_select_variant()` | Rolls source code back to a chosen snapshot variant. |
+| `hotswan_build_and_install()` | Full install fallback for schema changes. |
+
+## The canonical agent loop
+
+<Steps>
+  <Step title="Check status before any edit">
+    Call `hotswan_get_status()`. If `watcher` is not `WATCHING`, surface the issue to the human and stop. The reload tool silently no-ops when the watcher is not running.
+  </Step>
+  <Step title="Open a snapshot session">
+    Call `hotswan_start_snapshot()` so the loop has a visual record. Each reload inside the session auto-captures, letting the agent (or the human reviewing afterward) compare iterations and roll back to any variant.
+  </Step>
+  <Step title="Edit the target file">
+    Edit the Kotlin file using the agent's file-edit tool. Keep the change inside one composable scope when possible so the reload stays in tier 1 (see `/skills/hot-reload/preserving-state-across-reloads`).
+  </Step>
+  <Step title="Trigger reload and read the tier">
+    ```python
+    result = hotswan_reload(["app/src/main/kotlin/com/example/ui/HomeScreen.kt"])
+    tier = result["tier"]  # 1 = fast, 2 = composition reset, 3 = Activity restart
+    ```
+
+    Tier 1 means the loop stayed fast. Tier 2 or 3 means state was likely lost — re-establish navigation or transient UI before the next screenshot.
+  </Step>
+  <Step title="Screenshot and evaluate">
+    Call `hotswan_take_screenshot()`. Compare the returned image to the design intent. If acceptable, exit the loop and call `hotswan_stop_snapshot()`. If not, return to step 3 with a refined edit.
+  </Step>
+  <Step title="Fall back to full install for schema changes">
+    If the agent detects a schema change is needed (new parameter, constructor change, new resource ID), call `hotswan_build_and_install()` to perform a full incremental build and install, then resume the loop.
+
+    ```python
+    # Schema change required — fall back
+    hotswan_build_and_install()
+    # Wait for install, then resume
+    hotswan_get_status()  # confirm WATCHING again
+    ```
+  </Step>
+  <Step title="Roll back if an earlier iteration was better">
+    Call `hotswan_stop_snapshot()` to finalize the session, then `hotswan_select_variant()` to pick the preferred snapshot. HotSwan rolls the source code back to that variant.
+  </Step>
+</Steps>
+
+## Patterns
+
+### Minimal agent loop (pseudo-code)
+
+```python
+# 1. Gate: confirm watcher is active
+status = hotswan_get_status()
+assert status["watcher"] == "WATCHING"
+
+# 2. Open snapshot session for rollback
+hotswan_start_snapshot()
+
+# 3–5. Edit → reload → evaluate
+for iteration in range(MAX_ITERS):
+    edit_file("HomeScreen.kt", new_content)
+    result = hotswan_reload(["HomeScreen.kt"])
+    screenshot = hotswan_take_screenshot()
+    if matches_design_intent(screenshot):
+        break
+
+# 6. Close session
+hotswan_stop_snapshot()
+```
+
+### Do not reload without checking status first
+
+```python
+# WRONG — reload without a status check
+hotswan_reload(["Foo.kt"])
+# WRONG because: if watcher is NOT_CONNECTED the tool returns success
+# but nothing changed on device. The agent wastes iterations debugging
+# a no-op reload.
+```
+
+```python
+# RIGHT
+status = hotswan_get_status()
+if status["watcher"] != "WATCHING":
+    raise RuntimeError("HotSwan not watching — start the app in debug mode first")
+hotswan_reload(["Foo.kt"])
+```
+
+## Mandatory rules
+
+- **MUST** call `hotswan_get_status()` at the start of every agent session. Never assume the watcher is active.
+- **MUST** call `hotswan_start_snapshot()` before any multi-step iteration so rollback is possible.
+- **MUST NOT** invent tool names beyond the seven listed — the MCP server rejects unknown tool names.
+- **MUST** fall back to `hotswan_build_and_install()` for schema changes rather than retrying `hotswan_reload` repeatedly.
+- **PREFERRED:** limit each edit to one composable scope to maximize the chance of a tier 1 reload.
+
+## Verification
+
+- [ ] Agent calls `hotswan_get_status()` and confirms `WATCHING` before issuing any reload.
+- [ ] Snapshot session opened at the start; closed and variant selected at the end.
+- [ ] All tool names used exactly match the seven listed above.
+- [ ] Schema-change edits route to `hotswan_build_and_install()`, not `hotswan_reload`.
+
+<CardGroup cols={2}>
+  <Card title="Understanding Hot Reload Limits" icon="triangle-exclamation" href="/skills/hot-reload/understanding-hot-reload-limits">
+    Which changes hot-reload vs force a full rebuild.
+  </Card>
+  <Card title="Preserving State Across Reloads" icon="floppy-disk" href="/skills/hot-reload/preserving-state-across-reloads">
+    Keep the loop in tier 1 so state is never lost.
+  </Card>
+</CardGroup>

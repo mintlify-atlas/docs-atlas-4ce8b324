@@ -1,0 +1,116 @@
+---
+title: "Testing Compose Performance in Release Mode"
+description: "Debug builds inflate Compose numbers via Live Literals. Measure in release + R8 on a real device to get startup and frame-timing numbers matching real users."
+---
+
+Compose ships unbundled — its UI runtime is loaded from app code, runs interpreted in debug, and the Live Literals plugin turns every constant into a getter. Debug recomposition counts, debug startup numbers, and debug compiler reports are not what users experience. Cited measurement: roughly **75% startup gain** and **60% frame-render gain** when switching from debug to release with R8. This skill teaches how to set up a release-with-symbols build for honest measurement before any perf claim is made.
+
+## When to use this skill
+
+- A perf number came from a debug build, Layout Inspector against debug, or `CompilationMode.None`.
+- A CI perf gate is being designed with Macrobenchmark.
+- The developer asks "why are my benchmark numbers so much worse than what I see on Play Store?"
+- Compose Compiler reports are about to be read — they MUST come from the release output directory.
+
+## Why debug builds lie — the four mechanisms
+
+<AccordionGroup>
+  <Accordion title="1. Interpreted Compose runtime">
+    Compose UI is a regular dependency, not part of the platform. In debug, much of the runtime executes interpreted with JIT warmup happening across the first seconds. R8 in release performs lambda grouping, strips `sourceInformation()` calls, devirtualizes `ComposerImpl`, and constant-folds composable arguments.
+  </Accordion>
+  <Accordion title="2. Live Literals">
+    The Live Literals compiler plugin (on by default in debug for Android Studio live edit) wraps every literal — `0.dp`, `"Hello"`, `Color.Red` — in a getter. The recomposer treats these as dynamic, so reports flag composables as taking unstable params even when source code only uses constants.
+  </Accordion>
+  <Accordion title="3. No R8 / no full mode">
+    Even if R8 were enabled in debug it would be configured weakly. Without R8 full mode, lambda allocations remain, `sourceInformation` strings are present, and the per-frame budget is larger than what release ships.
+  </Accordion>
+  <Accordion title="4. Layout Inspector approximations">
+    Layout Inspector recomposition counts are approximate — they snapshot at intervals and miss intermediate work. Live Literals can also inflate them. Debug-only counts are diagnostic signals, not authoritative numbers.
+  </Accordion>
+</AccordionGroup>
+
+## Workflow
+
+<Steps>
+  <Step title="Set up a release-with-debug-symbols measurement build">
+    Add a `benchmark` build type that is release-like but can be profiled:
+
+    ```kotlin
+    android {
+        buildTypes {
+            create("benchmark") {
+                initWith(getByName("release"))
+                signingConfig = signingConfigs.getByName("debug")
+                matchingFallbacks += listOf("release")
+                isDebuggable = false
+                // allow profiling
+                proguardFiles(
+                    getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro"
+                )
+            }
+        }
+    }
+    ```
+  </Step>
+  <Step title="Disable Live Literals in non-debug builds">
+    Live Literals are disabled automatically for release builds. To confirm, check that the release `*-composables.txt` does not show constants as unstable parameters. Run:
+
+    ```bash
+    ./gradlew :app:assembleRelease
+    grep -c "unstable" app/build/compose_compiler/app-release-composables.txt
+    ```
+
+    Compare the count to debug. A large drop confirms Live Literals were inflating debug counts.
+  </Step>
+  <Step title="Read Compiler reports from the release output directory">
+    Release reports live in `app/build/compose_compiler/app-release-composables.txt`. Debug reports live in `app-debug-composables.txt`. **Never** read the debug report and apply conclusions to release behavior.
+  </Step>
+  <Step title="Use CompilationMode.Partial for meaningful Macrobenchmark numbers">
+    ```kotlin
+    benchmarkRule.measureRepeated(
+        compilationMode = CompilationMode.Partial(
+            baselineProfileMode = BaselineProfileMode.Require,
+        ),
+        // ...
+    )
+    ```
+
+    `CompilationMode.None` (all JIT) isolates the worst case. `CompilationMode.Full` (all AOT) shows the ceiling. `CompilationMode.Partial` with a Baseline Profile reflects what a real user sees after install.
+  </Step>
+  <Step title="Choose the right measurement device">
+    High-end Pixel devices mask gains. Use a **mid-range or low-end** device (2–4 GB RAM, mid-tier SoC) or a Cuttlefish emulator (`aosp_cf_x86_64_phone-userdebug`) for representative numbers. Quote the device model in any perf report.
+  </Step>
+</Steps>
+
+## Compile mode comparison
+
+| `CompilationMode` | What it simulates | Use for |
+|---|---|---|
+| `None` | Pure JIT, no AOT | Worst-case; isolates Baseline Profile contribution |
+| `Partial` + BaselineProfile | Fresh install with profile | Real-user experience |
+| `Full` | Full AOT | Best-case ceiling |
+
+## Mandatory rules
+
+- **MUST** measure in release + R8 + real device. Debug numbers are not valid perf claims.
+- **MUST** read Compose Compiler reports from `app-release-composables.txt`, not `app-debug-composables.txt`.
+- **MUST NOT** file a perf bug with numbers from a debug build, Layout Inspector against debug, or `CompilationMode.None`.
+- **MUST** quote the device model and build type in any perf report.
+- **PREFERRED:** a dedicated `benchmark` build type that is release-configured but debug-signed for easier profiling.
+
+## Verification
+
+- [ ] Benchmark numbers come from `./gradlew :app:assembleBenchmark` (or `:assembleRelease`) — confirmed by checking `build/outputs/apk/benchmark/` or `release/`.
+- [ ] Compiler reports read from `app-release-composables.txt`.
+- [ ] Device model documented in the perf report.
+- [ ] `isDebuggable = false` confirmed for the measured build type.
+
+<CardGroup cols={2}>
+  <Card title="Generating Baseline Profiles" icon="chart-line" href="/skills/measurement/generating-baseline-profiles">
+    Set up Macrobenchmark and BaselineProfileRule for production measurement.
+  </Card>
+  <Card title="Configuring R8 for Compose" icon="hammer" href="/skills/build/configuring-r8-for-compose">
+    Enable R8 full mode so the release build reflects production behavior.
+  </Card>
+</CardGroup>

@@ -1,0 +1,182 @@
+---
+title: "Choosing the Right Compose Effect API"
+description: "Pick the right Compose effect: LaunchedEffect, DisposableEffect, RememberedEffect, or ViewModelStoreScope. Fix stale callbacks with rememberUpdatedState."
+---
+
+Compose ships three built-in effect APIs: `LaunchedEffect` (coroutine, restarts on key change), `DisposableEffect` (setup/teardown with cleanup block), and `SideEffect` (runs on every successful composition). The `skydoves/compose-effects` library adds `RememberedEffect` — a non-coroutine analog of `LaunchedEffect` — and `ViewModelStoreScope` for per-composable ViewModel instances in a `LazyColumn`. Picking the wrong API wastes a coroutine scope, leaks a listener, or silently drops the latest callback.
+
+## When to use this skill
+
+- Deciding which effect API to choose, or why a `LaunchedEffect` restarts unexpectedly.
+- A long-lived `LaunchedEffect` calls a stale version of a callback the parent has updated.
+- A non-Compose subscriber (listener, observer, broadcast receiver) needs setup/teardown.
+- A `LazyColumn` row needs its own `ViewModel` instance (one per chat row, one per feed card).
+
+## When NOT to use this skill
+
+- Pure derivation of one `State<T>` from another — use `derivedStateOf`.
+- Collecting a flow that originates outside the composition — use `collectAsStateWithLifecycle`.
+- One-shot computation that must survive recomposition without re-running — use `remember {}`, not `LaunchedEffect(Unit)`.
+
+## Prerequisites
+
+- Compose UI 1.4+.
+- For `RememberedEffect` and `ViewModelStoreScope`: add `com.github.skydoves:compose-effects` (latest GA).
+- For Hilt-backed `ViewModelStoreScope`: also add `androidx.hilt:hilt-navigation-compose`.
+
+## Decision tree
+
+| Need | API |
+|---|---|
+| Coroutine, restarts on key change | `LaunchedEffect(key1, key2)` |
+| Setup + cleanup, no coroutine | `DisposableEffect(key) { onDispose { } }` |
+| Synchronous reaction to key change, no coroutine | `RememberedEffect(key)` (compose-effects) |
+| Long-lived LaunchedEffect with a callback that may change | `rememberUpdatedState(callback)` inside the effect |
+| Per-composable ViewModel (one per lazy row) | `ViewModelStoreScope(key = stableId)` |
+| After-every-commit side effect | `SideEffect {}` (rare) |
+
+## Patterns
+
+### Stale callback inside a long-lived LaunchedEffect
+
+```kotlin
+// WRONG
+@Composable
+fun Timer(onTick: () -> Unit) {
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000)
+            onTick()
+        }
+    }
+}
+// WRONG because: onTick is captured by the first composition's value; later parents pass
+// an updated lambda but the running coroutine still holds the original reference.
+```
+
+```kotlin
+// RIGHT
+@Composable
+fun Timer(onTick: () -> Unit) {
+    val latest by rememberUpdatedState(onTick)
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000)
+            latest()
+        }
+    }
+}
+```
+
+### DisposableEffect for a non-coroutine subscriber
+
+```kotlin
+// WRONG
+@Composable
+fun LocationBadge(client: LocationClient) {
+    LaunchedEffect(client) {
+        val listener = LocationListener { /* update state */ }
+        client.register(listener)
+        awaitCancellation()
+        // never reached — cleanup doesn't run if the composable leaves composition
+    }
+}
+```
+
+```kotlin
+// RIGHT
+@Composable
+fun LocationBadge(client: LocationClient) {
+    DisposableEffect(client) {
+        val listener = LocationListener { /* update state */ }
+        client.register(listener)
+        onDispose { client.unregister(listener) }
+    }
+}
+```
+
+### RememberedEffect for a synchronous reaction (no coroutine needed)
+
+```kotlin
+// WRONG — spinning a coroutine scope for synchronous work
+@Composable
+fun Tracker(userId: String) {
+    LaunchedEffect(userId) {
+        analytics.identify(userId)   // synchronous call
+    }
+}
+```
+
+```kotlin
+// RIGHT — RememberedEffect from skydoves/compose-effects
+@Composable
+fun Tracker(userId: String) {
+    RememberedEffect(userId) {
+        analytics.identify(userId)
+    }
+}
+```
+
+### ViewModelStoreScope for per-row ViewModels in LazyColumn
+
+```kotlin
+// WRONG — sharing one ViewModel across all rows
+LazyColumn {
+    items(rows, key = { it.id }) { row ->
+        val vm: RowViewModel = hiltViewModel()  // same instance for all rows
+        RowContent(vm)
+    }
+}
+```
+
+```kotlin
+// RIGHT — each row gets its own scoped ViewModel store
+LazyColumn {
+    items(rows, key = { it.id }) { row ->
+        ViewModelStoreScope(key = row.id) {
+            val vm: RowViewModel = hiltViewModel()
+            RowContent(vm)
+        }
+    }
+}
+```
+
+The `ViewModelStoreScope` ties the store lifecycle to the key — when the row leaves the list permanently, the store (and its ViewModel) is cleared.
+
+### SideEffect — use sparingly
+
+```kotlin
+// RIGHT — publishing Compose state to a non-Compose system on every commit
+@Composable
+fun UpdateAnalyticsOnEveryCommit(screenName: String) {
+    SideEffect {
+        analyticsTracker.setCurrentScreen(screenName)
+    }
+}
+```
+
+`SideEffect` really does run after **every** successful composition. Avoid for per-frame work — `DisposableEffect` or `LaunchedEffect` with the correct key is almost always the right shape.
+
+## Mandatory rules
+
+- **MUST** use `rememberUpdatedState(callback)` for any callback or lambda referenced inside a long-lived `LaunchedEffect(Unit)`.
+- **MUST** use `DisposableEffect` (not `LaunchedEffect`) for non-coroutine subscribers that need cleanup.
+- **MUST** provide a stable `key` to `ViewModelStoreScope` — the store is cleared and re-created on key change.
+- **MUST NOT** use `SideEffect` for per-frame work; it runs on every composition commit.
+- **PREFERRED:** `RememberedEffect` over `LaunchedEffect(key) { synchronousWork() }` when the work is synchronous.
+
+## Verification
+
+- [ ] No `LaunchedEffect(Unit)` that calls a callback directly — all long-lived effects use `rememberUpdatedState`.
+- [ ] Every non-coroutine subscriber uses `DisposableEffect` with a cleanup `onDispose`.
+- [ ] Every `ViewModelStoreScope` has a stable, unique key.
+- [ ] No `SideEffect` used for work that runs more than occasionally.
+
+<CardGroup cols={2}>
+  <Card title="Collecting Flows Safely" icon="water" href="/skills/side-effects/collecting-flows-safely">
+    Replace collectAsState with collectAsStateWithLifecycle.
+  </Card>
+  <Card title="Choosing derivedStateOf" icon="filter" href="/skills/recomposition/choosing-derivedstateof">
+    Filter high-frequency state into low-frequency output.
+  </Card>
+</CardGroup>

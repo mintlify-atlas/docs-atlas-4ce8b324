@@ -1,0 +1,167 @@
+---
+title: "Verify and lock in Compose performance improvements"
+description: "Re-run the baseline after every fix, regenerate the Baseline Profile, and wire a CI stability gate so regressions fail the build before reaching users."
+---
+
+A fix that has not been verified is a hypothesis. You measured a baseline before the fix and made a code change — now you need to confirm the Macrobenchmark moved in the right direction, regenerate the Baseline Profile to capture the faster code paths, and set up a CI gate that prevents a future PR from quietly undoing the work. The Verify phase turns a one-time improvement into a permanent invariant.
+
+## Skills in this phase
+
+<CardGroup cols={2}>
+  <Card
+    title="Configuring R8 for Compose"
+    icon="settings"
+    href="/skills/build/configuring-r8-for-compose"
+  >
+    Set up R8 full mode with `proguard-android-optimize.txt`, trust Compose's consumer rules, and avoid over-broad keeps that defeat lambda grouping and `ComposerImpl` devirtualization.
+  </Card>
+  <Card
+    title="Enforcing stability in CI"
+    icon="shield"
+    href="/skills/stability/enforcing-stability-in-ci"
+  >
+    Commit a stability baseline with `:stabilityDump`, wire `:stabilityCheck` into the CI job, and make stability regressions fail the build before they reach `main`.
+  </Card>
+</CardGroup>
+
+## Re-run the measurement baseline
+
+After every fix, run the same Macrobenchmark that produced the Phase 1 numbers — same device, same variant, same compilation mode, same iteration count. Record the P50 / P90 / P99 delta for scroll `FrameTimingMetric` and the median delta for cold startup `StartupTimingMetric`. A number without a comparison is not a result.
+
+```kotlin
+@RunWith(AndroidJUnit4::class)
+class StartupBenchmarks {
+    @get:Rule val rule = MacrobenchmarkRule()
+
+    @Test
+    fun coldStartupAfterFix() = rule.measureRepeated(
+        packageName = "com.example",
+        metrics = listOf(StartupTimingMetric(), FrameTimingMetric()),
+        iterations = 10,
+        startupMode = StartupMode.COLD,
+        compilationMode = CompilationMode.Partial(BaselineProfileMode.Require),
+    ) {
+        pressHome()
+        startActivityAndWait()
+    }
+}
+```
+
+If the numbers did not improve, the diagnosis was wrong or the fix was applied to the wrong composable. Return to the Diagnose phase. Do not proceed to the next fix on the list.
+
+<Warning>
+A fix that improves one metric while regressing another is a net negative until the regression is explained. If scroll P90 drops from 18 ms to 12 ms but cold startup regresses from 460 ms to 510 ms, the Phase 3 table must record both deltas and the open item must explain the startup regression before the audit can close.
+</Warning>
+
+## Regenerate the Baseline Profile
+
+After fixes land and the Macrobenchmark confirms improvement, regenerate the Baseline Profile. The profile is an AOT compilation hint list that ART uses on install. If the hot code paths changed — because a stability fix eliminated a composable from the recomposition path, or a modifier migration changed the draw pass — the existing profile no longer reflects the fastest paths. Regenerate it so ART compiles the right code:
+
+```bash
+./gradlew :app:generateBaselineProfile
+```
+
+Verify the profile shipped in the APK. Open **Build → Analyze APK** on the release artifact and confirm:
+
+```
+assets/dexopt/baseline.prof
+assets/dexopt/baseline.profm
+```
+
+If those files are absent, the `baselineProfile(project(":baselineprofile"))` dependency wiring on the app module is missing. Without them, ART has nothing to AOT-compile and the profile gain is zero.
+
+Commit `baseline-prof.txt` after regeneration so the next developer's release build ships with the updated profile.
+
+## R8 full mode as a codified invariant
+
+R8 full mode is not a one-time setup task — it is a permanent invariant that every other phase depends on. The cited 75% startup and 60% frame render improvements over debug require all of R8's Compose-specific passes: lambda grouping, `sourceInformation()` stripping, composable argument constant-folding, and `ComposerImpl` devirtualization. If a future PR introduces `-keep class androidx.compose.** { *; }` or switches to `proguard-android.txt`, all of those passes are silently defeated.
+
+```kotlin
+// app/build.gradle.kts — the configuration that must not regress
+android {
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+        }
+    }
+}
+```
+
+<Tip>
+Track APK `classes.dex` method count in CI with Build → Analyze APK or a Gradle plugin. A sudden increase in method count is a reliable signal that an over-broad keep was added and R8's shrinking passes are no longer running.
+</Tip>
+
+## Enforcing stability in CI
+
+Stability regressions are silent. A new `var` field added to a shared data class in a feature module can disable skipping across dozens of screens, and nothing in the build output complains. The `:stabilityCheck` Gradle task from [skydoves/compose-stability-analyzer](https://github.com/skydoves/compose-stability-analyzer) fixes this by committing a baseline and diffing it on every PR.
+
+### 1. Apply the plugin and configure it
+
+```kotlin
+// app/build.gradle.kts
+plugins {
+    alias(libs.plugins.compose.stability.analyzer)
+}
+
+composeStabilityAnalyzer {
+    enabled.set(true)
+    stabilityValidation {
+        enabled.set(true)
+        outputDir.set(layout.projectDirectory.dir("stability"))
+        failOnStabilityChange.set(true)
+    }
+}
+```
+
+### 2. Generate and commit the baseline
+
+```bash
+./gradlew :app:stabilityDump
+git add app/stability/
+git commit -m "chore(stability): seed baseline"
+```
+
+The baseline is plain text — reviewers can read the diff and see exactly which composable regressed and why.
+
+### 3. Wire the check into CI
+
+```yaml
+# .github/workflows/ci.yml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Assemble and check stability
+        run: ./gradlew assemble :app:stabilityCheck
+      - name: Upload stability diff on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stability-diff
+          path: app/build/reports/stability/
+```
+
+Run `:stabilityCheck` in the same job as `assemble`, not a separate one. A separate job re-resolves dependencies and re-compiles Kotlin from scratch, doubling CI time and delaying the failure signal.
+
+## Verification checklist
+
+Before declaring a fix complete:
+
+- [ ] Macrobenchmark re-run shows improvement (or no regression) vs the Phase 1 baseline
+- [ ] Baseline Profile regenerated and committed — `assets/dexopt/baseline.prof` present in the release APK
+- [ ] `app/build.gradle.kts` release block uses `proguard-android-optimize.txt` with no Compose-wide keeps
+- [ ] `app/stability/` baseline files committed and `:stabilityCheck` passes on the CI job
+- [ ] P50 / P90 / P99 deltas recorded in the Phase 3 audit table with device, variant, and iteration count
+
+<Note>
+The CI stability gate proves a class is *classified* stable by the compiler. It does not prove the running app *actually* recomposes less. Pair the gate with `@TraceRecomposition` at runtime so the team has both signals: compile-time classification stability and runtime recomposition counts. A green CI gate alongside rising recomposition counts means a runtime invalidation source — a misplaced `mutableStateOf` read — that classification alone cannot catch.
+</Note>

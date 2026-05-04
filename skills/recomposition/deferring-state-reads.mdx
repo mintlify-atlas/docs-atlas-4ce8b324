@@ -1,0 +1,192 @@
+---
+title: "Deferring State Reads from Composition to Layout or Draw"
+description: "Move hot state reads from Composition into Layout or Draw via offset {}, graphicsLayer {}, and drawBehind {} to stop per-frame subtree recomposition."
+---
+
+Compose runs three phases per frame — **Composition → Layout → Draw**. A state read at phase N invalidates phase N and every phase below it. Moving a hot state read (scroll position, animation value, drag offset) from Composition down to Layout or Draw via a lambda-based modifier eliminates full subtree recomposition on every frame. This skill covers the modifier-phase cheat sheet, the migration patterns, and the lambda-provider technique for crossing composable boundaries.
+
+## When to use this skill
+
+- An animation triggers full subtree recomposition per frame: `Modifier.alpha(progress.value)`, `Modifier.offset(x.dp)`, `Modifier.scale(state.value)`.
+- A scroll position is read directly in a composable body and the parent recomposes on every pixel of scroll.
+- `@TraceRecomposition` log shows the parent's recomposition counter incrementing once per animation tick.
+- A hot value (animation progress, drag offset) is passed as a `Float` parameter across composable boundaries.
+
+## When NOT to use this skill
+
+- State changes once per user interaction — the lambda-modifier rewrite adds complexity with no gain.
+- The state read genuinely needs to drive Composition (show/hide a different composable). Lambda modifiers cannot decide which composable to emit.
+- The slow path comes from an unstable parameter, not a hot read. Diagnose with `/skills/stability/diagnosing-compose-stability` first.
+- The goal is to filter many high-frequency inputs into one rare boolean — that is `/skills/recomposition/choosing-derivedstateof`.
+
+## Prerequisites
+
+- Familiarity with the three-phase model (Composition, Layout, Draw).
+- Compose UI 1.7+ for `rememberGraphicsLayer()`. Lambda forms of `offset {}`, `graphicsLayer {}`, `drawBehind {}`, `drawWithCache {}` exist on all supported versions.
+- Ability to confirm recomposition counts via Layout Inspector or `@TraceRecomposition`.
+- A **release** build for final measurement — debug builds lie.
+
+## Modifier phase reference
+
+| Modifier | Phase reads happen in |
+|---|---|
+| `Modifier.offset(Dp)` | **Composition** |
+| `Modifier.offset { IntOffset }` | **Layout** |
+| `Modifier.alpha(Float)` | **Composition** |
+| `Modifier.graphicsLayer { … }` | **Draw** |
+| `Modifier.rotate(Float)` | **Composition** |
+| `Modifier.scale(Float)` | **Composition** |
+| `Modifier.background(Color)` | **Composition** |
+| `Modifier.drawBehind { … }` | **Draw** |
+| `Modifier.drawWithCache { … }` | **Draw** |
+| `Modifier.padding(Dp)` | **Composition** (no lambda overload; use `Modifier.layout {}` for hot insets) |
+
+## Workflow
+
+<Steps>
+  <Step title="Identify the state read site">
+    Look for `state.value`, `animatedFloat.value`, `scrollState.value`, or `by state` in a composable body. Note which modifier consumes it.
+  </Step>
+  <Step title="Check for a lambda overload">
+    Most positioning/sizing/drawing modifiers ship in both a value form (reads in Composition) and a lambda form (reads in Layout or Draw). If a value form is fed a hot state, swap to the lambda form.
+  </Step>
+  <Step title="Migrate value-form modifiers to lambda form">
+    The lambda body re-executes when the read state changes, but during Layout or Draw — Composition is never invalidated.
+  </Step>
+  <Step title="Fold multiple per-frame transforms into one graphicsLayer block">
+    `Modifier.graphicsLayer { }` covers `translationX`, `translationY`, `scaleX`, `scaleY`, `rotationZ`, `alpha`, `clip`, and `shape` in one Draw-phase node. Prefer this over chaining `alpha + offset + rotate`.
+  </Step>
+  <Step title="Pass hot values as lambda providers across composable boundaries">
+    Pass `() -> Float` instead of `Float` so the receiving composable defers the read inside its own lambda modifier without invalidating its caller.
+  </Step>
+  <Step title="Verify in Layout Inspector or @TraceRecomposition">
+    The parent composable's recomposition count MUST stop incrementing per animation frame. If it still climbs, a hot `.value` read survived — re-grep the file.
+  </Step>
+</Steps>
+
+## Patterns
+
+### Animated offset
+
+```kotlin
+// WRONG
+val animatedX = animateFloatAsState(targetX, label = "x")
+Box(Modifier.offset(x = animatedX.value.dp))
+// WRONG because: reading .value in Composition invalidates the whole subtree on every animation frame.
+```
+
+```kotlin
+// RIGHT
+val animatedX = animateFloatAsState(targetX, label = "x")
+Box(Modifier.offset { IntOffset(animatedX.value.toInt(), 0) })
+```
+
+### Animated alpha and combined transforms
+
+```kotlin
+// WRONG
+val animatedAlpha by animateFloatAsState(targetAlpha, label = "alpha")
+Box(Modifier.alpha(animatedAlpha))
+// WRONG because: Modifier.alpha(Float) reads in Composition; the entire Box subtree recomposes every frame.
+```
+
+```kotlin
+// RIGHT — single Draw-phase node, three transforms
+Box(
+    Modifier.graphicsLayer {
+        alpha = progress
+        scaleX = 1f + 0.2f * progress
+        scaleY = 1f + 0.2f * progress
+        translationX = progress * 32.dp.toPx()
+    }
+)
+```
+
+### Scroll-driven sticky header
+
+```kotlin
+// WRONG
+val offset = scrollState.value
+Header(Modifier.offset(y = offset.dp))
+// WRONG because: reading scrollState.value in the parent body recomposes Header
+// (and every sibling) per scroll tick.
+```
+
+```kotlin
+// RIGHT
+Header(Modifier.offset { IntOffset(0, scrollState.value) })
+```
+
+### Lambda providers across composable boundaries
+
+```kotlin
+// WRONG
+@Composable
+fun Parent(scrollOffset: Float) {
+    Child(scrollOffset)
+}
+// WRONG because: scrollOffset is read in Parent's signature each frame;
+// Parent and all siblings of Child recompose per frame.
+```
+
+```kotlin
+// RIGHT
+@Composable
+fun Parent(scrollOffset: () -> Float) {
+    Child(scrollOffset)
+}
+
+@Composable
+fun Child(scrollOffset: () -> Float) {
+    Box(Modifier.offset { IntOffset(0, scrollOffset().toInt()) })
+}
+```
+
+### Per-frame draw work with drawBehind and drawWithCache
+
+```kotlin
+// WRONG
+val color = animatedColor.value
+Box(Modifier.background(color))
+// WRONG because: Modifier.background reads color in Composition; per-frame animation invalidates the subtree.
+```
+
+```kotlin
+// RIGHT — heavier work; cache the Brush across frames
+Box(
+    Modifier.drawWithCache {
+        val brush = Brush.linearGradient(
+            colors = listOf(start, end),
+            start = Offset.Zero,
+            end = Offset(size.width, size.height),
+        )
+        onDrawBehind { drawRect(brush, alpha = animatedAlpha.value) }
+    }
+)
+```
+
+`drawWithCache` re-builds the cache only when captured values change; `onDrawBehind` re-runs on every Draw with the latest state.
+
+## Mandatory rules
+
+- **MUST** prefer lambda-based modifiers for any state that changes more often than once per user interaction.
+- **MUST** use `Modifier.graphicsLayer { }` for animated `alpha`, `scale`, `rotate`, `translation`. Never use the value-form overloads with hot state.
+- **MUST NOT** read frequently-changing state in a composable body when a lambda modifier could read it during Layout or Draw.
+- **MUST NOT** write to a `MutableState` already read in the same composition pass — that is a backwards write; the runtime aborts the recomposition.
+- **PREFERRED:** lambda providers (`() -> T`) over plain values when the value is hot and crosses composable boundaries.
+
+## Verification
+
+- [ ] Layout Inspector shows the parent composable's recomposition count is 0 per animation frame.
+- [ ] `@TraceRecomposition` in release + R8 confirms the wrapping composable does not recompose per frame.
+- [ ] Grep finds no `Modifier.alpha(`/`Modifier.rotate(`/`Modifier.scale(`/`Modifier.offset(<dp expr>)` patterns fed by hot state.
+- [ ] Cross-composable hot values are passed as `() -> T` lambda providers.
+
+<CardGroup cols={2}>
+  <Card title="Debugging Recompositions" icon="eye" href="/skills/recomposition/debugging-recompositions">
+    Identify which composable and parameter is causing recomposition.
+  </Card>
+  <Card title="Choosing derivedStateOf" icon="filter" href="/skills/recomposition/choosing-derivedstateof">
+    Filter high-frequency inputs into low-frequency outputs.
+  </Card>
+</CardGroup>

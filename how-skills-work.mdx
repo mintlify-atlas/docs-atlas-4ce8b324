@@ -1,0 +1,130 @@
+---
+title: "How Agent Skills work in Compose Performance Skills"
+description: "Learn the SKILL.md format, how agents match trigger vocabulary to load skills, and how skills chain to each other across the performance loop."
+keywords: ["skill.md", "frontmatter", "trigger", "agent skills", "workflow", "categories", "chaining"]
+---
+
+Every skill in this library is a plain Markdown file named `SKILL.md`. An agent runtime reads the file's YAML frontmatter to decide whether the skill applies to the current task, then follows the numbered workflow in the file body step by step. No plugin, no SDK, no runtime dependency — just a Markdown file the agent loads on demand. Understanding the format helps you know what to expect from the agent and how to write prompts that reliably trigger the right skill.
+
+## A skill vs. documentation
+
+A skill is operational instructions for an LLM, not human documentation. That distinction shapes everything about how the files are written:
+
+| Dimension | Skill (SKILL.md) | Human documentation |
+|---|---|---|
+| Voice | Terse, imperative, second person to the agent | Explanatory, contextual, second person to the human |
+| Code samples | RIGHT/WRONG snippet pairs that model the exact diff to make | Illustrative examples |
+| Rules | `MUST` and `MUST NOT` in bold caps, treated as hard constraints | Guidelines and recommendations |
+| Completion signal | Verification checklist the agent runs before declaring the work done | None |
+| Length | 500 lines or fewer; overflow moves to `references/` | Unconstrained |
+
+## The SKILL.md format
+
+Each skill file has two parts: YAML frontmatter that controls when the skill loads, and a Markdown body that contains the instructions the agent follows.
+
+### Frontmatter
+
+```yaml
+---
+name: diagnosing-compose-stability
+description: >
+  Use this skill when the developer reports scroll jank, dropped frames,
+  unexpected recompositions, or high recomposition counts in a Jetpack
+  Compose screen. Loads Compose Compiler reports, parses stability output,
+  and identifies unstable parameters as the root cause.
+metadata:
+  keywords:
+    - recomposition
+    - stability
+    - unstable
+    - compose compiler
+    - dropped frames
+    - scroll jank
+---
+```
+
+- **`name`**: The slug that identifies the skill. Matches the directory name.
+- **`description`**: The trigger paragraph. The agent reads this first to decide if the skill is relevant. Write it as "Use this skill when…" so the match heuristic is unambiguous.
+- **`metadata.keywords`**: A list of terms the agent uses as additional signal when matching. These should mirror the words a developer would naturally use when describing the symptom.
+
+### Skill body structure
+
+The body follows a consistent structure across all 26 skills:
+
+1. **When to use** — Restates the trigger conditions in fuller detail, including conditions where the skill should *not* be used.
+2. **Prerequisites** — Tools, Gradle plugins, or environment state the agent must verify before starting (e.g., R8 enabled, compiler reports generated from a release build).
+3. **Workflow** — A numbered list of steps. Each step is actionable. The agent executes them in order.
+4. **Patterns** — RIGHT and WRONG snippet pairs. Each pair shows the problematic code and the corrected version side by side. The agent uses these as templates for the diff it produces.
+5. **Mandatory rules** — `MUST` and `MUST NOT` directives in bold. The agent treats these as hard constraints, not suggestions.
+6. **Verification** — A checklist the agent runs after completing the workflow to confirm the fix is correct and complete. The agent does not declare the work done until every item passes.
+
+## How agents match and load skills
+
+When you describe a symptom in a prompt, the agent runtime scans all installed `SKILL.md` frontmatter files and scores each skill against your input. The `description` field carries most of the weight — it is a natural-language paragraph written to match the vocabulary a developer uses when reporting the problem. The `metadata.keywords` list provides additional signal for exact-match terms.
+
+A single prompt can load more than one skill. If your description mentions both a stability symptom and a lazy list symptom, the agent may load both skills and interleave their workflows. Skills are written to be composable: each one scopes its workflow to a single cause so the combined diff stays coherent.
+
+<Tip>
+  Write prompts that describe observable symptoms, not implementation hunches. "My LazyColumn drops frames and recomposition counts spike on scroll" triggers the right skills more reliably than "fix my stability annotations."
+</Tip>
+
+## How skills chain to each other
+
+Skills reference each other explicitly. A diagnostic skill names the fix skills it can hand off to; a fix skill states which diagnostic skill should have produced its input. The agent does not have to infer the path — the chain is written into the skill body.
+
+For example:
+
+- `stability/diagnosing-compose-stability` identifies unstable parameters from compiler reports, then explicitly chains to `stability/stabilizing-compose-types` for the fix.
+- `audit/auditing-compose-performance` is an orchestrator skill that sequences the entire loop: it calls `measurement/testing-compose-in-release-mode` first, then routes to the appropriate diagnostic skills, then to fix skills, and finally to `stability/enforcing-stability-in-ci` for the verification gate.
+
+Cross-references between skills use relative Markdown links (`../../stability/diagnosing-compose-stability/SKILL.md`) so they resolve correctly when browsing the repository on GitHub.
+
+## Directory layout
+
+```
+compose-performance-skills/
+├── README.md
+├── INDEX.md
+└── <category>/<slug>/
+    ├── SKILL.md
+    └── references/
+        └── <topic>.md
+```
+
+- **`<category>`**: One of the nine lowercase category names listed below.
+- **`<slug>`**: Gerund form, lowercase, hyphenated, max 64 characters (e.g., `diagnosing-compose-stability`, `migrating-to-modifier-node`).
+- **`SKILL.md`**: Uppercase. Every skill body is 500 lines or fewer. Longer material moves into `references/`.
+- **`references/`**: One level deep only. Files here are referenced from `SKILL.md` by relative links. Deeper nesting breaks how agents preview the files.
+
+## The 9 categories and their slugs
+
+| Category | Slugs |
+|---|---|
+| `stability/` | `diagnosing-compose-stability`, `stabilizing-compose-types`, `understanding-stability-inference`, `enforcing-stability-in-ci`, `using-stability-analyzer-ide-plugin`, `visualizing-recomposition-cascades` |
+| `recomposition/` | `debugging-recompositions`, `deferring-state-reads`, `choosing-derivedstateof`, `using-strong-skipping-correctly`, `avoiding-subcomposition-pitfalls` |
+| `lists/` | `optimizing-lazy-layouts`, `configuring-lazy-prefetch` |
+| `modifiers/` | `migrating-to-modifier-node`, `ordering-modifier-chains` |
+| `side-effects/` | `collecting-flows-safely`, `using-efficient-effects` |
+| `measurement/` | `generating-baseline-profiles`, `testing-compose-in-release-mode`, `tracing-recompositions-at-runtime` |
+| `build/` | `configuring-r8-for-compose` |
+| `audit/` | `auditing-compose-performance` |
+| `hot-reload/` | `setting-up-compose-hotswan`, `understanding-hot-reload-limits`, `preserving-state-across-reloads`, `iterating-with-ai-and-mcp` |
+
+## Why the install script is needed
+
+Agent runtimes — Claude Code, Android Studio Agent mode, Gemini — expect skills at a flat depth: `<skills-dir>/<slug>/SKILL.md`. This repository organizes skills under nested category folders (`<category>/<slug>/SKILL.md`) for human readability when browsing on GitHub. Without flattening, the loader cannot find the `SKILL.md` files.
+
+The `install-skills.sh` script resolves this by symlinking each `<category>/<slug>/` folder directly under the target skills directory as `<slug>/`. The source repository stays in one place; the symlinks provide the flat view the agent expects. See the [quickstart](/quickstart) for the exact commands.
+
+## The INDEX.md lookup table
+
+The repository ships an `INDEX.md` file that maps observable symptoms, specific APIs, and workflow phases to the skill that handles each one. It is the human-readable entry point when you want to know which skill to expect the agent to load — or when you want to load a skill manually by name.
+
+<CardGroup cols={2}>
+  <Card title="Browse skills by category" icon="list" href="/skills/stability/diagnosing-compose-stability">
+    See all 26 skills with descriptions, trigger conditions, and workflow summaries.
+  </Card>
+  <Card title="Performance loop overview" icon="arrows-spin" href="/performance-loop/overview">
+    Understand how the 9 categories map to Measure, Diagnose, Fix, Verify, and Iterate.
+  </Card>
+</CardGroup>

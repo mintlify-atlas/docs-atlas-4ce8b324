@@ -1,0 +1,149 @@
+---
+title: "Configuring R8 for Compose: Minimal Keep Rules"
+description: "Set up R8 full mode with proguard-android-optimize.txt and no Compose-specific keeps to unlock 75% startup and 60% frame-render improvements over debug builds."
+---
+
+R8 is the only supported shrinker for Compose apps — ProGuard is deprecated. Compose ships consumer ProGuard rules with every artifact, so most apps need **no** Compose-specific keep rules. The big wins come from R8 full mode (default since AGP 8.0): lambda grouping, `sourceInformation()` stripping, constant-folding of composable args, and `ComposerImpl` devirtualization. Cited measurement: roughly **75% startup gain** and **60% frame-render gain** switching from debug to release with R8.
+
+## When to use this skill
+
+- Setting up a new Compose app's release variant for the first time.
+- A PR adds `-keep class androidx.compose.** { *; }` or any Compose-wide keep — push back.
+- A release build crashes after enabling minification.
+- APK size review surfaces a large `classes.dex`.
+
+## When NOT to use this skill
+
+- The app is not ready to ship a release variant.
+- The perf concern is recomposition or stability — see the stability and recomposition skills.
+- The release variant has already been measured and is fine.
+
+## Prerequisites
+
+- AGP 8.0+ for R8 full mode default. On older AGP, enable it in `gradle.properties` with `android.enableR8.fullMode=true`.
+- Kotlin 2.0+ with `org.jetbrains.kotlin.plugin.compose` applied so consumer rules resolve correctly.
+- Familiarity with the difference between `proguard-android.txt` and `proguard-android-optimize.txt`.
+
+## What R8 does for Compose
+
+| Optimization | Effect |
+|---|---|
+| Lambda grouping | Merges many generated lambda classes, reducing dex size |
+| `sourceInformation()` stripping | Removes source-position metadata strings, smaller APK and less work per recompose |
+| Composable arg constant-folding | Constants folded back into recomposer skip checks |
+| `ComposerImpl` devirtualization | Devirtualizes hot runtime calls — major frame-render contributor |
+| Resource shrinking (`isShrinkResources`) | Strips unreachable drawables, strings, and layout XML |
+
+## Workflow
+
+<Steps>
+  <Step title="Configure the release buildType — the minimal correct config">
+    ```kotlin
+    // app/build.gradle.kts
+    android {
+        buildTypes {
+            release {
+                isMinifyEnabled = true
+                isShrinkResources = true
+                proguardFiles(
+                    getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro",
+                )
+            }
+        }
+    }
+    ```
+
+    <Warning>
+      Use `proguard-android-optimize.txt`, **not** `proguard-android.txt`. Only the `-optimize` variant enables R8's optimization passes.
+    </Warning>
+  </Step>
+  <Step title="Trust Compose's bundled consumer rules — add no Compose keeps">
+    Each Compose artifact ships a `consumer-rules.pro` that R8 picks up automatically through dependency resolution. The developer's `proguard-rules.pro` should contain **zero** lines starting with `-keep class androidx.compose.`.
+
+    ```proguard
+    # WRONG — defeats R8 lambda grouping and sourceInformation() stripping
+    -keep class androidx.compose.** { *; }
+    ```
+
+    ```proguard
+    # RIGHT — nothing Compose-specific needed in proguard-rules.pro
+    # (only add keeps for your own reflective consumers: @Serializable, Hilt entry points, etc.)
+    ```
+  </Step>
+  <Step title="Identify legitimate keep needs from the project">
+    R8 problems come from outside Compose:
+
+    - `@Serializable` data classes — the `kotlinx-serialization` Gradle plugin emits the right rules; verify, do not duplicate.
+    - Hilt/Dagger entry points — the Hilt plugin emits these.
+    - Custom `rememberSaveable` `Saver` objects accessed reflectively.
+    - Any `Class.forName(...)` consumer, JNI binding, or service loader.
+    - Public API surfaces of library modules consumed by other apps.
+  </Step>
+  <Step title="Use the AGP missing-rule reporter for post-crash analysis">
+    After a release build that crashes at runtime, AGP writes:
+    `app/build/outputs/mapping/release/missing_rules.txt`
+
+    This file lists the exact `-keep` directives R8 inferred. Add only those, narrowed to the specific class/method. Do not add speculative keeps.
+  </Step>
+  <Step title="Retrace crash stacks with R8 retrace">
+    ```bash
+    $ANDROID_HOME/cmdline-tools/latest/bin/retrace \
+        app/build/outputs/mapping/release/mapping.txt < crash.txt
+    ```
+
+    Or using the AGP Gradle task:
+    ```bash
+    ./gradlew :app:retrace --stacktrace crash.txt
+    ```
+  </Step>
+</Steps>
+
+## Patterns
+
+### Minimal correct proguard-rules.pro for a Compose + Hilt + Serialization app
+
+```proguard
+# No Compose-specific keeps needed — Compose ships consumer rules.
+
+# Keep @Serializable classes if using kotlinx.serialization without the plugin
+# (plugin users: this is already handled)
+# -keepclassmembers @kotlinx.serialization.Serializable class * { *; }
+
+# Keep Saver implementations if reflectively constructed
+-keep class com.example.app.SaverImpl { *; }
+```
+
+### Verify R8 full mode is active
+
+```bash
+# AGP 8.0+ default — no extra config needed.
+# Confirm by checking that the release APK is significantly smaller than debug.
+ls -la app/build/outputs/apk/debug/app-debug.apk
+ls -la app/build/outputs/apk/release/app-release.apk
+# Release should be 40-70% smaller.
+```
+
+## Mandatory rules
+
+- **MUST** use `proguard-android-optimize.txt` (not `proguard-android.txt`).
+- **MUST NOT** add `-keep class androidx.compose.** { *; }` or any blanket Compose keep.
+- **MUST** run the AGP missing-rule reporter before adding any keep rule — do not add speculative keeps.
+- **PREFERRED:** set `isShrinkResources = true` alongside `isMinifyEnabled = true`.
+- **PREFERRED:** keep `mapping.txt` artifacts in CI for retrace support on release crash reports.
+
+## Verification
+
+- [ ] Release APK size is significantly smaller than debug APK.
+- [ ] `proguard-rules.pro` contains no lines starting with `-keep class androidx.compose.`.
+- [ ] Release build installs and runs without `ClassNotFoundException` or `NoSuchMethodError`.
+- [ ] Macrobenchmark `StartupTimingMetric` shows improvement vs a debug baseline (see `testing-compose-in-release-mode`).
+
+<CardGroup cols={2}>
+  <Card title="Testing in Release Mode" icon="flask" href="/skills/measurement/testing-compose-in-release-mode">
+    Why debug lies and how to measure release performance honestly.
+  </Card>
+  <Card title="Generating Baseline Profiles" icon="chart-line" href="/skills/measurement/generating-baseline-profiles">
+    Generate the AOT compilation hint list that unlocks first-run performance.
+  </Card>
+</CardGroup>

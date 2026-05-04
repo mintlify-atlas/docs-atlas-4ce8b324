@@ -1,0 +1,158 @@
+---
+title: "Generating Baseline Profiles for Compose Apps"
+description: "Generate Compose Baseline Profiles with the AGP 8.2+ template and measure cold startup and scroll impact using MacrobenchmarkRule and FrameTimingMetric."
+---
+
+Baseline Profiles ship an AOT compilation hint list inside the APK so ART pre-compiles hot Compose code paths on install instead of relying on JIT during the first runs. Cited gains: roughly 30% faster cold startup and 40% smoother first-scroll on profiled journeys. Compose ships unbundled from the platform, so every Compose UI app benefits — there is no version of Android where Compose is already AOT-compiled by the system image.
+
+## When to use this skill
+
+- Cold startup is slow and you want AOT-compiled hot paths on first launch.
+- First-scroll on a `LazyColumn`/`LazyVerticalGrid` is janky on real devices even after stability fixes.
+- Preparing a release build and you need a perf baseline before shipping.
+- Verifying that a stability or strong-skipping fix moved cold-startup or frame-timing numbers.
+
+## When NOT to use this skill
+
+- Still in early prototyping with no release-ready user journeys — there are no hot paths to encode while screens are still churning.
+- The developer wants per-composable recomposition counts — use `tracing-recompositions-at-runtime`.
+- Numbers are being collected from a debug build. See `testing-compose-in-release-mode` first.
+
+## Prerequisites
+
+- **AGP 8.2+** for the **New Module → Baseline Profile Generator** template.
+- A **physical low-end test device** or Cuttlefish emulator (`aosp_cf_x86_64_phone-userdebug`).
+- A **release** variant (`isMinifyEnabled = true`, `proguard-android-optimize.txt`).
+- `<profileable android:shell="true"/>` in the app `AndroidManifest.xml` under `<application>`.
+- At least one **scroll journey** beyond startup — a feed list, paginated grid, or detail screen.
+
+## Workflow
+
+<Steps>
+  <Step title="Add the Baseline Profile Generator module">
+    In Android Studio: **File → New → New Module → Baseline Profile Generator**. Pick the target app module. AGP scaffolds:
+
+    - A `:baselineprofile` module with the `androidx.baselineprofile` Gradle plugin.
+    - A `BaselineProfileGenerator.kt` skeleton.
+    - A `StartupBenchmarks.kt` skeleton.
+    - The plugin wired in the app module so `./gradlew :app:generateBaselineProfile` works.
+  </Step>
+  <Step title="Write the BaselineProfileRule journey">
+    The journey MUST cover cold startup AND at least one scroll:
+
+    ```kotlin
+    @RunWith(AndroidJUnit4::class)
+    class BaselineProfileGenerator {
+
+        @get:Rule
+        val rule = BaselineProfileRule()
+
+        @Test
+        fun generate() = rule.collect(packageName = "com.example.app") {
+            pressHome()
+            startActivityAndWait()
+
+            // Scroll the main feed
+            device.findObject(By.res("snack_feed")).also { feed ->
+                feed.setGestureMargin(device.displayWidth / 5)
+                feed.fling(Direction.DOWN)
+            }
+            waitForIdle()
+        }
+    }
+    ```
+  </Step>
+  <Step title="Emit accurate time-to-fully-drawn with ReportDrawnWhen">
+    ```kotlin
+    @Composable
+    fun HomeScreen(viewModel: HomeViewModel) {
+        val state by viewModel.uiState.collectAsStateWithLifecycle()
+        ReportDrawnWhen { state is UiState.Success }
+        // ...
+    }
+    ```
+
+    `ReportDrawnWhen` blocks TTFD reporting until the lambda returns `true` — use it when the screen has meaningful async content (images, network data).
+  </Step>
+  <Step title="Generate the profile">
+    ```bash
+    ./gradlew :app:generateBaselineProfile
+    ```
+
+    The plugin runs the `BaselineProfileGenerator` test on a connected device, collects the hot class/method list, and writes `baseline-prof.txt` into the app's assets.
+
+    Verify the profile shipped inside the APK:
+    ```bash
+    ./gradlew :app:assembleRelease
+    unzip -p app/build/outputs/apk/release/app-release.apk assets/dexopt/baseline.prof | xxd | head
+    ```
+  </Step>
+  <Step title="Measure with MacrobenchmarkRule">
+    ```kotlin
+    @RunWith(AndroidJUnit4::class)
+    class StartupBenchmarks {
+
+        @get:Rule
+        val benchmarkRule = MacrobenchmarkRule()
+
+        @Test
+        fun startupCompilationPartial() = benchmarkRule.measureRepeated(
+            packageName = "com.example.app",
+            metrics = listOf(StartupTimingMetric()),
+            compilationMode = CompilationMode.Partial(
+                baselineProfileMode = BaselineProfileMode.Require,
+            ),
+            iterations = 10,
+            setupBlock = { pressHome() },
+        ) {
+            startActivityAndWait()
+        }
+
+        @Test
+        fun scrollFeedFrameTiming() = benchmarkRule.measureRepeated(
+            packageName = "com.example.app",
+            metrics = listOf(FrameTimingMetric()),
+            compilationMode = CompilationMode.Partial(
+                baselineProfileMode = BaselineProfileMode.Require,
+            ),
+            iterations = 5,
+        ) {
+            startActivityAndWait()
+            device.findObject(By.res("snack_feed")).fling(Direction.DOWN)
+        }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Key metrics
+
+| Metric | What it measures | Watch for |
+|---|---|---|
+| `StartupTimingMetric` | Cold/warm/hot startup duration | `timeToInitialDisplayMs`, `timeToFullDisplayMs` |
+| `FrameTimingMetric` | Per-frame render duration | `frameDurationCpuMs` p50/p95/p99 |
+| `ReportDrawn` | Time to fully drawn (TTFD) | Gap between `timeToInitialDisplay` and `timeToFullDisplay` |
+
+## Mandatory rules
+
+- **MUST** measure in release + R8 + real device. Debug builds are not measurable — they run interpreted.
+- **MUST** use `CompilationMode.Partial(BaselineProfileMode.Require)` when measuring profile impact. `CompilationMode.None` intentionally disables AOT, which is good for isolating the profile contribution.
+- **MUST** include at least one scroll journey in the profile generator — startup alone leaves first-scroll uncompiled.
+- **MUST NOT** measure on a high-end Pixel device for final numbers — it masks the gains. Use a low-end or mid-range device.
+- **PREFERRED:** `ReportDrawnWhen { state is UiState.Success }` over `ReportDrawn()` when the screen has async content.
+
+## Verification
+
+- [ ] `baseline-prof.txt` present in `app/src/main/generated/baselineProfiles/`.
+- [ ] `assets/dexopt/baseline.prof` present in the release APK.
+- [ ] `StartupTimingMetric` shows `timeToInitialDisplayMs` improvement vs `CompilationMode.None` baseline.
+- [ ] `FrameTimingMetric` p99 ≤ 16 ms on the target device for the scroll journey.
+
+<CardGroup cols={2}>
+  <Card title="Testing in Release Mode" icon="flask" href="/skills/measurement/testing-compose-in-release-mode">
+    Why debug builds lie and how to set up release measurement.
+  </Card>
+  <Card title="Configuring R8 for Compose" icon="hammer" href="/skills/build/configuring-r8-for-compose">
+    Enable R8 full mode to unlock the runtime performance Compose assumes.
+  </Card>
+</CardGroup>

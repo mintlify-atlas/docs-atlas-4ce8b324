@@ -1,0 +1,301 @@
+---
+title: "Enforcing Compose Stability in CI — Regression Gates"
+description: "Commit a stability baseline, diff it on every PR with stabilityCheck, and fail the build automatically when a class or composable becomes less stable."
+---
+
+Stability is a property that silently regresses. A new `var` field in a shared data class can disable skipping across dozens of screens, and nothing in the build output warns you. Treat stability like binary compatibility: commit a baseline, diff it on every PR, and fail the build when the diff goes the wrong way. This skill sets that gate up using the `skydoves/compose-stability-analyzer` Gradle plugin and points to `j-roskopf/ComposeGuard` for Compose Multiplatform projects.
+
+## When to use this skill
+
+- The team wants a stability service-level objective enforced automatically, not by manual code review
+- A PR introduced an unstable parameter that went unnoticed until field jank reports arrived
+- You are migrating a large app to Strong Skipping and need a regression net while refactoring
+- You want to standardize stability practice across a monorepo with many feature modules
+- Someone mentions `stabilityCheck`, `stabilityDump`, baseline drift, ComposeGuard, or "fail the build on stability regression"
+
+## Prerequisites
+
+- Kotlin 2.0+ with `org.jetbrains.kotlin.plugin.compose` applied; Strong Skipping is on by default
+- Gradle 8+
+- A working CI pipeline that already runs `./gradlew assemble` or equivalent
+- Run [Diagnosing Compose Stability](/skills/stability/diagnosing-compose-stability) first — baseline a state the team is willing to defend, not a known-broken state
+- Ability to commit generated files to the repository — the `.stability` baseline must be checked in
+
+## Workflow
+
+<Steps>
+  <Step title="Apply the plugin">
+    Add the plugin to the version catalog and apply it to every module that ships UI composables.
+
+    ```toml
+    # gradle/libs.versions.toml
+    [versions]
+    compose-stability-analyzer = "0.7.3"
+
+    [plugins]
+    compose-stability-analyzer = { id = "com.github.skydoves.compose.stability.analyzer", version.ref = "compose-stability-analyzer" }
+    ```
+
+    ```kotlin
+    // app/build.gradle.kts (and every UI feature module)
+    plugins {
+        alias(libs.plugins.android.application)
+        alias(libs.plugins.kotlin.android)
+        alias(libs.plugins.kotlin.compose)
+        alias(libs.plugins.compose.stability.analyzer)
+    }
+    ```
+
+    <Warning>
+      Apply the plugin **after** the Compose compiler plugin so it can read the same compiler output.
+    </Warning>
+  </Step>
+
+  <Step title="Configure the DSL block">
+    ```kotlin
+    // app/build.gradle.kts
+    composeStabilityAnalyzer {
+        enabled.set(true)
+
+        stabilityValidation {
+            enabled.set(true)
+            outputDir.set(layout.projectDirectory.dir("stability"))
+            failOnStabilityChange.set(true)
+            ignoredPackages.set(
+                listOf(
+                    "com.example.preview",     // @Preview-only composables
+                    "com.example.benchmark",   // microbenchmark fixtures
+                )
+            )
+            ignoredClasses.set(
+                listOf(
+                    "com.example.testing.FakeRepository",
+                )
+            )
+            stabilityConfigurationFiles.add(
+                rootProject.layout.projectDirectory.file("stability_config.conf")
+            )
+        }
+    }
+    ```
+
+    Key settings:
+
+    - `outputDir` — write to a path **inside** the module so it is co-located with source. Do **not** write to `build/` — that directory is gitignored and the baseline must be committed
+    - `failOnStabilityChange` — set to `true` for CI; developers may toggle it locally, but the committed value must be `true`
+    - `ignoredPackages` / `ignoredClasses` — exclude `@Preview` composables, benchmark fixtures, and test doubles that intentionally violate stability rules
+    - `stabilityConfigurationFiles` — point at the same `stability_config.conf` the Compose compiler reads so the plugin and compiler agree on classifications
+  </Step>
+
+  <Step title="Generate the baseline locally">
+    ```bash
+    ./gradlew :app:stabilityDump
+    # or, for a specific variant:
+    ./gradlew :app:debugStabilityDump
+    ```
+
+    The plugin writes one `.stability` file per module per variant under `outputDir`. A single entry looks like this:
+
+    ```text
+    @Composable
+    public fun com.example.CounterDisplay(count: com.example.MainViewModel): kotlin.Unit
+      skippable: false
+      restartable: true
+      params:
+        - count: RUNTIME (requires runtime check)
+    ```
+
+    Commit the files:
+
+    ```bash
+    git add app/stability/
+    git commit -m "chore(stability): seed baseline"
+    ```
+  </Step>
+
+  <Step title="Wire stabilityCheck into CI">
+    Add the task to the same job that compiles. Earlier signal beats a separate stage.
+
+    ```yaml
+    # .github/workflows/ci.yml
+    name: CI
+    on:
+      pull_request:
+      push:
+        branches: [main]
+
+    jobs:
+      build:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v4
+          - uses: actions/setup-java@v4
+            with:
+              distribution: temurin
+              java-version: 17
+          - uses: gradle/actions/setup-gradle@v4
+          - name: Assemble and check stability
+            run: ./gradlew assemble :app:stabilityCheck
+          - name: Upload stability diff on failure
+            if: failure()
+            uses: actions/upload-artifact@v4
+            with:
+              name: stability-diff
+              path: app/build/reports/stability/
+    ```
+
+    `stabilityCheck` reads the committed baseline, regenerates a current snapshot in `build/`, diffs them, and fails the task if any composable became less skippable or any class became less stable.
+  </Step>
+
+  <Step title="Handle a regression">
+    When `stabilityCheck` fails, you have two valid responses:
+
+    - **Fix the regression.** Stabilize the offending type (`var` → `val`, `List` → `ImmutableList`, `Flow` parameter → `collectAsStateWithLifecycle` upstream). Re-run `:stabilityDump` locally to confirm the baseline is unchanged, then push.
+    - **Update the baseline with justification.** Run `:stabilityDump` to update the baseline, commit it, and add a note in the PR description explaining why the regression is intentional. Code review enforces the justification — the diff is plain text and reviewable.
+  </Step>
+
+  <Step title="Tune ignores conservatively">
+    `ignoredPackages` and `ignoredClasses` exist for legitimate exemptions: previews, benchmarks, test doubles, generated code. Every ignore entry needs a comment explaining why.
+
+    <Tabs>
+      <Tab title="Right">
+        ```kotlin
+        ignoredPackages.set(
+            listOf(
+                "com.example.preview",   // @Preview composables intentionally use mutable state for tooling
+                "com.example.benchmark"  // microbenchmark fixtures need fresh allocations per iteration
+            )
+        )
+        ```
+      </Tab>
+      <Tab title="Wrong">
+        ```kotlin
+        ignoredPackages.set(listOf("com.example.feature.cart"))
+        ```
+        Silencing an entire production package hides real regressions. The team will rediscover the lost skipping as field jank weeks later.
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Consider ComposeGuard for Compose Multiplatform">
+    If the project is Compose Multiplatform (desktop, iOS via KMP) or outside the Android Gradle plugin's reach, use `j-roskopf/ComposeGuard`. It implements the same idea — commit a baseline, diff in CI, fail on regression — and exposes `<variant>ComposeCompilerGenerate` and `<variant>ComposeCompilerCheck` tasks. Wire it the same way as `stabilityDump`/`stabilityCheck` above.
+  </Step>
+</Steps>
+
+## Patterns
+
+### Baseline location — inside the module, not in build/
+
+<Tabs>
+  <Tab title="Right">
+    ```text
+    app/stability/
+      app-debug.stability   # committed
+      app-release.stability # committed
+
+    # CI runs:
+    ./gradlew :app:stabilityCheck
+    ```
+  </Tab>
+  <Tab title="Wrong">
+    ```text
+    app/build/stability/    # in build/, gitignored, never committed
+    ```
+    Every CI run starts from a fresh `build/`. The baseline does not exist and `stabilityCheck` either no-ops or always passes. The gate is theater.
+  </Tab>
+</Tabs>
+
+### `failOnStabilityChange` — committed value must be `true`
+
+<Tabs>
+  <Tab title="Right">
+    ```kotlin
+    // Committed default — CI blocks on regression
+    composeStabilityAnalyzer {
+        stabilityValidation {
+            failOnStabilityChange.set(true)
+        }
+    }
+    ```
+
+    Local opt-out via a Gradle property is acceptable:
+
+    ```kotlin
+    failOnStabilityChange.set(
+        providers.gradleProperty("composeStabilityStrict").orNull?.toBoolean() ?: true
+    )
+    ```
+
+    ```bash
+    ./gradlew :app:stabilityCheck -PcomposeStabilityStrict=false
+    ```
+  </Tab>
+  <Tab title="Wrong">
+    ```kotlin
+    // WRONG — committed default
+    composeStabilityAnalyzer {
+        stabilityValidation {
+            failOnStabilityChange.set(false)
+        }
+    }
+    ```
+    Turns the gate into an informational warning. Developers learn to ignore it. Stability regresses anyway.
+  </Tab>
+</Tabs>
+
+### Run `stabilityCheck` in the assemble job, not a separate one
+
+<Tabs>
+  <Tab title="Right">
+    ```yaml
+    # Earlier signal, single workflow run
+    - run: ./gradlew assemble :app:stabilityCheck
+    ```
+  </Tab>
+  <Tab title="Wrong">
+    ```yaml
+    jobs:
+      assemble:
+        steps: [./gradlew assemble]
+      stability:
+        needs: assemble
+        steps: [./gradlew :app:stabilityCheck]
+    ```
+    The stability job re-resolves dependencies and re-runs Compose compilation from scratch, doubling CI time and delaying the failure signal.
+  </Tab>
+</Tabs>
+
+## Mandatory rules
+
+- **MUST** commit the `.stability` baseline file(s) to version control — a baseline that lives in `build/` is not a baseline
+- **MUST** set `failOnStabilityChange.set(true)` in the committed Gradle config — local opt-out via a Gradle property is acceptable; committing `false` is not
+- **MUST NOT** add a package or class to `ignoredPackages`/`ignoredClasses` without a one-line comment explaining why
+- **MUST NOT** baseline a known-bad starting state — run the diagnostic and fix skills first; baseline only what the team is willing to defend
+- **MUST** apply the plugin to **every** UI module, not just `:app` — a regression in a feature module is invisible to an `:app`-only check
+
+## Verification
+
+- [ ] `composeStabilityAnalyzer` plugin block present in every UI module's `build.gradle.kts`
+- [ ] `app/stability/` (or the configured `outputDir`) is committed and contains at least one `.stability` file per shipping variant
+- [ ] `failOnStabilityChange.set(true)` is the committed default
+- [ ] CI workflow runs `./gradlew :app:stabilityCheck` on every pull request
+- [ ] Gate is tested: temporarily change a `val` to `var` in a shared data class on a throwaway branch, push, and confirm the PR check turns red with the regressed composable named in the output; revert the test change
+- [ ] Every entry in `ignoredPackages` and `ignoredClasses` has a comment explaining why it is exempt
+- [ ] Running `./gradlew :app:stabilityDump` locally produces only `.stability` file changes — reviewable as plain text
+
+## Related skills
+
+<CardGroup cols={2}>
+  <Card title="Diagnosing Compose Stability" href="/skills/stability/diagnosing-compose-stability">
+    Run this before seeding the baseline to ensure you are not locking in known-bad state.
+  </Card>
+  <Card title="Stabilizing Compose Types" href="/skills/stability/stabilizing-compose-types">
+    Fix regressions surfaced by the CI gate.
+  </Card>
+  <Card title="Understanding Stability Inference" href="/skills/stability/understanding-stability-inference">
+    Understand what the gate is checking — the 12-phase classification model.
+  </Card>
+  <Card title="Using the Stability Analyzer IDE Plugin" href="/skills/stability/using-stability-analyzer-ide-plugin">
+    Catch regressions before they reach CI with live in-editor stability feedback.
+  </Card>
+</CardGroup>

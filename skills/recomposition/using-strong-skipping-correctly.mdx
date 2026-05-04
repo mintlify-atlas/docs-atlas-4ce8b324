@@ -1,0 +1,214 @@
+---
+title: "Using Strong Skipping Mode Correctly in Jetpack Compose"
+description: "Strong Skipping Mode (Kotlin 2.0.20+) auto-memoizes capturing lambdas in @Composable scopes. Learn its gaps in LazyListScope and when @DontMemoize is needed."
+---
+
+Strong Skipping Mode is the Compose compiler behavior that became the default with the Kotlin Compose compiler plugin shipped in **Kotlin 2.0.20**. It makes every restartable composable skippable (unstable params compared with `===`, stable params with `equals`) and auto-wraps every capturing lambda inside a `@Composable` function in `remember(captures) { }`. Both behaviors are on by default with no opt-in required. This skill covers verification, the gaps where auto-memoization does not apply, and the escape hatches.
+
+## When to use this skill
+
+- The developer asks "do I still need `@Stable`?" or "does this composable skip now?"
+- A composable still recomposes on every parent tick despite the developer expecting strong skipping to fix it.
+- The developer asks about `@DontMemoize` or `@NonSkippableComposable`.
+- Migrating from Kotlin 1.9.x / Compose Compiler 1.5.x to Kotlin 2.0.20+.
+
+## When NOT to use this skill
+
+- The question is "what makes a type stable?" — use `/skills/stability/understanding-stability-inference`.
+- Stability is regressing and you need a CI gate — use `/skills/stability/enforcing-stability-in-ci`.
+- The composable is still recomposing and you need to instrument it first — use `/skills/recomposition/debugging-recompositions`.
+
+## Prerequisites
+
+- Kotlin **2.0.20+** with `org.jetbrains.kotlin.plugin.compose` applied. Strong Skipping is on by default.
+- Compose Compiler reports turned on for the module under audit.
+- Builds running in **release** when reading reports — debug adds Live Literals which distort skip behavior.
+
+## Workflow
+
+<Steps>
+  <Step title="Verify strong skipping is active">
+    Confirm the toolchain version before claiming any behavior is "because of strong skipping":
+
+    ```bash
+    ./gradlew :app:dependencies --configuration kotlinCompilerPluginClasspathRelease | grep -i compose
+    ```
+
+    To **disable** strong skipping on Kotlin 2.0.20+ (modern DSL):
+
+    ```kotlin
+    import androidx.compose.compiler.plugins.kotlin.ComposeFeatureFlag
+
+    composeCompiler {
+        featureFlags.add(ComposeFeatureFlag.StrongSkipping.disabled())
+    }
+    ```
+
+    Then regenerate reports and confirm previously-unstable composables now show `restartable skippable`:
+
+    ```bash
+    ./gradlew :app:assembleRelease
+    grep -A1 "restartable" app/build/compose_compiler/app-release-composables.txt | head -40
+    ```
+  </Step>
+  <Step title="Audit lambda capture sites inside @Composable scopes">
+    Strong skipping auto-wraps **capturing** lambdas inside `@Composable` functions in `remember(captures) { }`. Capture-less lambdas are compiler-emitted singletons — NOT auto-remembered. A lambda that captures an **unstable** value re-captures on every recompose because `===` fails for a fresh literal.
+
+    ```kotlin
+    // RIGHT — captures stable id + callback; auto-remembered
+    @Composable
+    fun Row(snack: Snack, onClick: (Long) -> Unit) {
+        Button(onClick = { onClick(snack.id) }) { Text(snack.name) }
+    }
+    ```
+
+    ```kotlin
+    // WRONG — freshly allocated list literal; new reference each recompose
+    @Composable
+    fun Header(title: String) {
+        Toolbar(actions = listOf(Action.Share, Action.Save)) { /* ... */ }
+    }
+    // WRONG because: listOf(...) allocates a new List every recompose; === fails every time.
+    ```
+
+    ```kotlin
+    // RIGHT — hoist the unstable literal
+    @Composable
+    fun Header(title: String) {
+        val actions = remember { listOf(Action.Share, Action.Save) }
+        Toolbar(actions = actions) { /* ... */ }
+    }
+    ```
+  </Step>
+  <Step title="Identify gaps where strong skipping does NOT memoize">
+    Auto-remember only applies to lambdas inside a **`@Composable`** function. These scopes are NOT `@Composable` and lambdas inside them are not auto-remembered:
+
+    - `LazyListScope.items { }`, `LazyGridScope.items { }`
+    - `Modifier.pointerInput { }`, `Modifier.draggable { }`
+    - Object expressions and SAM conversions
+    - `Modifier.drawBehind { }`, `Modifier.drawWithCache { }`
+
+    ```kotlin
+    // WRONG — onClick allocated per item per recompose; strong skipping doesn't reach here
+    LazyColumn {
+        items(snacks, key = { it.id }) { snack ->
+            SnackRow(snack, onClick = { vm.select(snack.id) })
+        }
+    }
+    ```
+
+    ```kotlin
+    // RIGHT — use a method reference (stable)
+    LazyColumn {
+        items(snacks, key = { it.id }) { snack ->
+            SnackRow(snack, onClick = vm::select)
+        }
+    }
+    ```
+  </Step>
+  <Step title="Apply escape hatches when needed">
+    - **`@DontMemoize`** at a lambda expression site — the lambda must NOT be auto-remembered. Apply on the lambda literal: `Button(onClick = @DontMemoize { ... })`. Never on a type position.
+    - **`@NonSkippableComposable`** on a function — opt out of skipping entirely. Use for side-effect-only composables that must run on every recompose.
+    - **`@NonRestartableComposable`** — drops the restart scope. Use only for very small composables where restart bookkeeping costs more than the body.
+  </Step>
+  <Step title="Confirm with @TraceRecomposition">
+    ```kotlin
+    @TraceRecomposition(traceStates = true)
+    @Composable
+    fun SnackRow(snack: Snack, onClick: (Long) -> Unit) { /* ... */ }
+    ```
+
+    Logcat prints one line per recomposition with changed parameters, directly answering whether strong skipping skipped the call.
+  </Step>
+</Steps>
+
+## Patterns
+
+### Stability still matters under strong skipping
+
+```kotlin
+// WRONG
+data class Filter(val tags: List<String>, val sort: SortOrder)
+
+@Composable
+fun FilterBar(filter: Filter) { /* ... */ }
+// WRONG because: Filter is unstable (List<String>). Strong skipping makes FilterBar
+// skippable, but only when prevFilter === newFilter. A copy() with the same content
+// fails identity and recomposes every time.
+```
+
+```kotlin
+// RIGHT
+@Immutable
+data class Filter(val tags: ImmutableList<String>, val sort: SortOrder)
+
+@Composable
+fun FilterBar(filter: Filter) { /* ... */ }
+```
+
+### Hoist unstable literal collections
+
+```kotlin
+// WRONG
+@Composable
+fun Toolbar(title: String) {
+    ActionRow(actions = listOf(Action.Share, Action.Save))
+}
+// WRONG because: listOf(...) allocates a new List per recompose; === fails every time.
+```
+
+```kotlin
+// RIGHT
+private val ToolbarActions = persistentListOf(Action.Share, Action.Save)
+
+@Composable
+fun Toolbar(title: String) {
+    ActionRow(actions = ToolbarActions)
+}
+```
+
+### @DontMemoize for intentionally-fresh lambdas
+
+```kotlin
+// RIGHT — @DontMemoize at the lambda expression, not on the type
+@Composable
+fun TraceContent(latest: Int, body: @Composable (() -> Unit) -> Unit) {
+    body(@DontMemoize { sendTelemetry("snapshot=$latest") })
+}
+```
+
+### @NonSkippableComposable for side-effect-only composables
+
+```kotlin
+// RIGHT
+@NonSkippableComposable
+@Composable
+fun FrameTicker(onTick: () -> Unit) {
+    SideEffect { onTick() }
+}
+```
+
+## Mandatory rules
+
+- **MUST** verify Kotlin / Compose compiler version before claiming strong skipping is active.
+- **MUST NOT** declare a composable "skippable thanks to strong skipping" without checking `*-composables.txt`.
+- **MUST** prefer `@Immutable` / `@Stable` for types on hot paths — `===` is a poor substitute for `equals` when producers don't preserve identity.
+- **MUST NOT** use `@DontMemoize` or `@NonSkippableComposable` without a co-located comment explaining why.
+- **MUST NOT** treat strong skipping as a substitute for hoisting unstable literals.
+
+## Verification
+
+- [ ] Confirmed Kotlin 2.0.20+ and no `ComposeFeatureFlag.StrongSkipping.disabled()` opt-out.
+- [ ] `*-composables.txt` shows `restartable skippable` on previously-unstable-param composables.
+- [ ] Audited for unstable literal captures in non-`@Composable` scopes (`LazyListScope.items`, `Modifier.pointerInput`).
+- [ ] Any `@DontMemoize` / `@NonSkippableComposable` has a co-located explanatory comment.
+- [ ] Runtime confirmed via `@TraceRecomposition` that the composable skips when inputs are equal.
+
+<CardGroup cols={2}>
+  <Card title="Diagnosing Compose Stability" icon="magnifying-glass" href="/skills/stability/diagnosing-compose-stability">
+    Read compiler reports to find unstable types.
+  </Card>
+  <Card title="Enforcing Stability in CI" icon="shield-check" href="/skills/stability/enforcing-stability-in-ci">
+    Prevent strong-skipping regressions with automated gates.
+  </Card>
+</CardGroup>

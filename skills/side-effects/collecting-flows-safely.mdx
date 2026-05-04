@@ -1,0 +1,141 @@
+---
+title: "Collecting Flows Safely with collectAsStateWithLifecycle"
+description: "Replace collectAsState() with collectAsStateWithLifecycle() to stop background drain. Remove Flow composable params and add conflate/distinctUntilChanged."
+---
+
+`collectAsState()` keeps collecting whenever the composable is in composition — including while the app is backgrounded — wasting CPU and battery. `collectAsStateWithLifecycle()` ties collection to a `Lifecycle.State` (default `STARTED`) so backgrounding pauses upstream work. For chatty flows, pair with `.conflate()` and `.distinctUntilChanged()`. A `Flow<T>` parameter on a composable is unstable and blocks skipping for the whole composable — collect at the caller and pass the resolved value instead.
+
+## When to use this skill
+
+- A `ViewModel` or `Repository` exposes `StateFlow<T>`, `SharedFlow<T>`, or a cold `Flow<T>` to a Compose screen.
+- Background battery drain, wakelock noise on logcat, or "the screen keeps working when backgrounded."
+- A composable's signature is `fun MyScreen(state: Flow<State>)` (Flow-as-parameter antipattern).
+- The developer asks about `collectAsState` vs `collectAsStateWithLifecycle`, or `Lifecycle.State.STARTED` vs `RESUMED`.
+
+## When NOT to use this skill
+
+- The flow is constructed and consumed inside one composable's `remember {}` — use `mutableStateOf` directly.
+- The data source is already `State<T>` — do not wrap it in a flow just to call `collectAsStateWithLifecycle()`.
+
+## Prerequisites
+
+- Add `androidx.lifecycle:lifecycle-runtime-compose` (2.6+) to expose `collectAsStateWithLifecycle`.
+- Kotlin coroutines basics (`StateFlow`, `SharedFlow`, `conflate`, `distinctUntilChanged`).
+
+## Workflow
+
+<Steps>
+  <Step title="Replace every collectAsState() call">
+    Search for `\.collectAsState\(` and replace with `collectAsStateWithLifecycle()`:
+
+    ```kotlin
+    // WRONG
+    import androidx.compose.runtime.collectAsState
+
+    @Composable
+    fun HomeScreen(viewModel: HomeViewModel) {
+        val state by viewModel.uiState.collectAsState()
+        HomeContent(state)
+    }
+    // WRONG because: collection continues while backgrounded → wasted CPU and battery.
+    ```
+
+    ```kotlin
+    // RIGHT
+    import androidx.lifecycle.compose.collectAsStateWithLifecycle
+
+    @Composable
+    fun HomeScreen(viewModel: HomeViewModel) {
+        val state by viewModel.uiState.collectAsStateWithLifecycle()
+        HomeContent(state)
+    }
+    ```
+  </Step>
+  <Step title="Provide an initialValue for non-StateFlow sources">
+    For cold `Flow<T>` or `SharedFlow<T>`, provide an initial value. For `StateFlow<T>`, the overload reads `.value` automatically.
+
+    ```kotlin
+    val events by eventsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    ```
+  </Step>
+  <Step title="Choose the right minActiveState">
+    - Default `STARTED` — matches `repeatOnLifecycle` default. Correct for most cases.
+    - `RESUMED` — use for sensors or GPS that should only collect while the Activity owns input focus.
+    - Never use `CREATED` — that defeats the purpose.
+
+    ```kotlin
+    val state by viewModel.sensorData.collectAsStateWithLifecycle(
+        minActiveState = Lifecycle.State.RESUMED,
+    )
+    ```
+  </Step>
+  <Step title="Add conflate and distinctUntilChanged for high-frequency producers">
+    For producers emitting more than once per ~100 ms, add operators upstream:
+
+    ```kotlin
+    val price by viewModel.prices
+        .conflate()
+        .distinctUntilChanged()
+        .collectAsStateWithLifecycle(initialValue = Price.ZERO)
+    ```
+  </Step>
+  <Step title="Hoist Flow parameters out of composables (skydoves hot take #4)">
+    ```kotlin
+    // WRONG — Flow parameter makes the composable unstable
+    @Composable
+    fun PriceTicker(prices: Flow<Price>) {
+        val price by prices.collectAsStateWithLifecycle(Price.ZERO)
+        Text(price.formatted)
+    }
+    // WRONG because: Flow is unstable; the composable can never be skipped.
+    ```
+
+    ```kotlin
+    // RIGHT — collect at the caller, pass resolved value
+    @Composable
+    fun PriceTicker(price: Price) {
+        Text(price.formatted)
+    }
+
+    // In the parent:
+    val price by viewModel.prices.collectAsStateWithLifecycle(Price.ZERO)
+    PriceTicker(price = price)
+    ```
+  </Step>
+  <Step title="Use snapshotFlow for State → Flow direction">
+    ```kotlin
+    // RIGHT — bridge Compose state to a coroutine flow for side effects
+    @Composable
+    fun AnalyticsFeed(listState: LazyListState) {
+        LaunchedEffect(listState) {
+            snapshotFlow { listState.firstVisibleItemIndex }
+                .distinctUntilChanged()
+                .collect { index -> analytics.recordScrollPosition(index) }
+        }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Mandatory rules
+
+- **MUST** replace `collectAsState()` with `collectAsStateWithLifecycle()` for any flow whose upstream should pause when the app backgrounds.
+- **MUST NOT** pass `Flow<T>` as a composable parameter — collect it at the caller and pass the resolved `T`.
+- **PREFERRED:** `.conflate().distinctUntilChanged()` for high-frequency producers (sensors, GPS, price ticks).
+- **PREFERRED:** `snapshotFlow { … }` over `derivedStateOf` for fire-and-forget side effects on Compose state.
+
+## Verification
+
+- [ ] Grep finds no `\.collectAsState()` calls in Compose UI files (unless consuming a composable-internal flow).
+- [ ] No `Flow<T>` parameters on `@Composable` functions — all flows collected at ViewModel/screen level.
+- [ ] Logcat shows no upstream emissions with the app in the recents tray (after backgrounding).
+- [ ] `@TraceRecomposition` confirms the composable does not recompose per high-frequency emission.
+
+<CardGroup cols={2}>
+  <Card title="Using Efficient Effects" icon="bolt" href="/skills/side-effects/using-efficient-effects">
+    Choose between LaunchedEffect, DisposableEffect, and RememberedEffect.
+  </Card>
+  <Card title="Choosing derivedStateOf" icon="filter" href="/skills/recomposition/choosing-derivedstateof">
+    Filter high-frequency state into low-frequency output.
+  </Card>
+</CardGroup>

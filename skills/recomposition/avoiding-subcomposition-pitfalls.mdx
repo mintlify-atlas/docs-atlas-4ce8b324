@@ -1,0 +1,177 @@
+---
+title: "Avoiding SubcomposeLayout and BoxWithConstraints Pitfalls"
+description: "Detect when BoxWithConstraints and Scaffold add measure-phase cost, replace unjustified uses with Modifier.onSizeChanged, and tune SubcomposeLayout slot reuse."
+---
+
+`SubcomposeLayout` runs its content's composition **during the measure pass**, not during the parent's composition pass. `BoxWithConstraints`, `material3.Scaffold`, and the lazy layouts are all built on top of it, so the cost is invisible until it nests or lands inside a hot path. This skill covers how to detect misuse, when to replace with a cheaper primitive, and how to tune `SubcomposeLayout` when its power is genuinely needed.
+
+## When to use this skill
+
+- `BoxWithConstraints` is used only to read `maxWidth`/`maxHeight` for a modifier-level effect.
+- `BoxWithConstraints` or `Scaffold` is nested inside another `BoxWithConstraints` or `Scaffold`.
+- A `BoxWithConstraints` sits inside a `LazyColumn`/`LazyRow` item and scroll jank appeared after the wrap.
+- A custom `SubcomposeLayout`'s measure block allocates a fresh composable lambda inside `subcompose(slotId) { … }` on every measurement.
+- A Perfetto trace shows `Compose:applyChanges` firing per scroll tick or per constraint change.
+
+## When NOT to use this skill
+
+- The children's composition genuinely depends on another child's measured size — keep `SubcomposeLayout`.
+- The slow path in a `LazyColumn` is unstable parameters, not subcomposition — use `/skills/stability/diagnosing-compose-stability`.
+- The issue is a hot animation value driving repeated measurement — use `/skills/recomposition/deferring-state-reads`.
+
+## Prerequisites
+
+- Familiarity with Compose's three phases (Composition, Layout, Draw).
+- A **release** build with R8 for final measurement.
+- Layout Inspector or Perfetto with `androidx.compose.runtime:runtime-tracing`.
+
+## Workflow
+
+<Steps>
+  <Step title="Identify every SubcomposeLayout user in the hot path">
+    Grep for `BoxWithConstraints`, `Scaffold`, `SubcomposeLayout`, and any custom `@Composable` that delegates to one. `material3.Scaffold` and `BoxWithConstraints` are both implemented with `SubcomposeLayout`; their cost is identical.
+  </Step>
+  <Step title="Decide whether constraints are actually consumed during composition">
+    A `BoxWithConstraints` that reads `maxWidth` only to pass it as a parameter is wasting the subcomposition machinery. A `BoxWithConstraints` that picks between two completely different `@Composable` trees based on `maxWidth < 600.dp` is using it correctly.
+  </Step>
+  <Step title="Replace unjustified BoxWithConstraints">
+    If the consumer only needs the final size in pixels (for an offset, alpha, or draw command), use `Modifier.layout { measurable, constraints -> }` or `Modifier.onSizeChanged { }` instead. Both run during the layout phase without spinning up a new composition.
+  </Step>
+  <Step title="Avoid nesting subcomposing layouts">
+    Two `Scaffold`s nested, or a `BoxWithConstraints` inside a `Scaffold` that itself contains another `BoxWithConstraints`, multiplies measure-phase composition. Hoist the outer one to the screen root.
+  </Step>
+  <Step title="Never wrap LazyColumn items in BoxWithConstraints">
+    Each item subcomposes during measurement. If the item needs the available width, pass it once from the parent or use `Modifier.fillMaxWidth().onSizeChanged { }`.
+  </Step>
+  <Step title="Tune justified SubcomposeLayout with slot reuse">
+    When `SubcomposeLayout` is the right tool, pass a `SubcomposeSlotReusePolicy` so the layout retains previously-composed slots:
+
+    ```kotlin
+    val slotState = remember {
+        SubcomposeLayoutState(SubcomposeSlotReusePolicy(maxSlotsToRetainForReuse = 8))
+    }
+    SubcomposeLayout(state = slotState) { constraints ->
+        val measurables = subcompose(slotId = "content") { Content() }
+        // ...
+    }
+    ```
+  </Step>
+  <Step title="Precompose upcoming slots on a previous frame">
+    Call `state.precompose(slotId, content)` on an earlier frame. The next `subcompose(slotId, …)` during measurement skips the composition step entirely.
+  </Step>
+</Steps>
+
+## Patterns
+
+### BoxWithConstraints to read size — replace with onSizeChanged
+
+```kotlin
+// WRONG
+@Composable
+fun ParallaxHeader(scrollOffset: () -> Float) {
+    BoxWithConstraints {
+        val widthPx = with(LocalDensity.current) { maxWidth.toPx() }
+        Image(
+            modifier = Modifier.fillMaxWidth().height(220.dp)
+                .graphicsLayer { translationX = scrollOffset() * widthPx * 0.2f },
+            painter = painterResource(R.drawable.hero),
+            contentDescription = null,
+        )
+    }
+}
+// WRONG because: BoxWithConstraints subcomposes during the measure phase. Each new
+// constraint (rotation, IME show) re-runs that subcomposition just to read maxWidth.
+```
+
+```kotlin
+// RIGHT
+@Composable
+fun ParallaxHeader(scrollOffset: () -> Float) {
+    var widthPx by remember { mutableStateOf(0f) }
+    Image(
+        modifier = Modifier.fillMaxWidth().height(220.dp)
+            .onSizeChanged { widthPx = it.width.toFloat() }
+            .graphicsLayer { translationX = scrollOffset() * widthPx * 0.2f },
+        painter = painterResource(R.drawable.hero),
+        contentDescription = null,
+    )
+}
+```
+
+### BoxWithConstraints inside LazyColumn items — hoist to the parent
+
+```kotlin
+// WRONG
+LazyColumn {
+    items(rows) { row ->
+        BoxWithConstraints {
+            val isWide = maxWidth > 600.dp
+            RowContent(row, isWide)
+        }
+    }
+}
+// WRONG because: every newly visible item pays for a fresh subcomposition on scroll.
+```
+
+```kotlin
+// RIGHT
+@Composable
+fun RowFeed(rows: List<Row>) {
+    BoxWithConstraints {
+        val isWide = maxWidth > 600.dp
+        LazyColumn {
+            items(rows, key = { it.id }) { row -> RowContent(row, isWide) }
+        }
+    }
+}
+```
+
+### Nested Scaffold — collapse to one
+
+```kotlin
+// WRONG
+@Composable
+fun ProfileScreen() {
+    Scaffold(topBar = { TopBar() }) { outer ->
+        Scaffold(modifier = Modifier.padding(outer), bottomBar = { TabBar() }) { inner ->
+            Content(modifier = Modifier.padding(inner))
+        }
+    }
+}
+// WRONG because: each Scaffold is a SubcomposeLayout. Nesting them doubles the cost.
+```
+
+```kotlin
+// RIGHT
+@Composable
+fun ProfileScreen() {
+    Scaffold(topBar = { TopBar() }, bottomBar = { TabBar() }) { padding ->
+        Content(modifier = Modifier.padding(padding))
+    }
+}
+```
+
+## Mandatory rules
+
+- **MUST NOT** use `BoxWithConstraints` only to read `maxWidth`/`maxHeight` for a `Modifier`-level effect. Use `Modifier.onSizeChanged { }` or `Modifier.layout { }` instead.
+- **MUST NOT** place a `BoxWithConstraints` inside a `LazyColumn`/`LazyRow`/`LazyVerticalGrid` item.
+- **MUST NOT** nest `Scaffold` inside another `Scaffold`.
+- **MUST** keep `SubcomposeLayout` when the children's composition genuinely depends on a measured value.
+- **MUST** pass a `SubcomposeSlotReusePolicy` to `SubcomposeLayoutState` whenever slots come and go.
+- **PREFERRED:** `state.precompose(slotId, content)` on a previous frame for predictable upcoming slots.
+
+## Verification
+
+- [ ] Perfetto trace shows `Compose:recompose` and `Compose:applyChanges` no longer fire on every measurement tick.
+- [ ] Grep finds zero `BoxWithConstraints` inside `LazyColumn`/`LazyRow`/`LazyVerticalGrid` items.
+- [ ] No `Scaffold` nested inside another `Scaffold`.
+- [ ] Any retained `SubcomposeLayout` passes a `SubcomposeSlotReusePolicy` or has a comment explaining why reuse is unnecessary.
+
+<CardGroup cols={2}>
+  <Card title="Optimizing Lazy Layouts" icon="list-ul" href="/skills/lists/optimizing-lazy-layouts">
+    Stable keys and contentType for smooth LazyColumn.
+  </Card>
+  <Card title="Deferring State Reads" icon="arrow-down" href="/skills/recomposition/deferring-state-reads">
+    Move animated reads out of Composition phase.
+  </Card>
+</CardGroup>

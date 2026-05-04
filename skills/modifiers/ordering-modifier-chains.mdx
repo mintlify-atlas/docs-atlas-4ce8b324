@@ -1,0 +1,148 @@
+---
+title: "Ordering Modifier Chains to Fix Paint, Click, and Clip Bugs"
+description: "Fix Modifier ordering bugs: background vs padding, clickable touch target, clip before background, graphicsLayer scope. Each modifier wraps everything below it."
+---
+
+`Modifier.padding(8.dp).background(Red)` and `Modifier.background(Red).padding(8.dp)` produce different visual results. Each modifier wraps the next as a function — the top modifier is the outermost wrapper, the bottom modifier is closest to the content. Wrong order is the most common Compose UI visual bug after missing keys. This skill teaches the mental model and fixes the four canonical ordering pitfalls.
+
+## When to use this skill
+
+- The click area extends past the visible button bounds, or the ripple fires in the wrong shape.
+- The background is painted in the wrong region (inside padding instead of outside, or vice versa).
+- A `clip` modifier is not masking the content below it.
+- `graphicsLayer { alpha = 0.5f }` is applying to the wrong subtree.
+- The developer asks "does `Modifier` order matter?" or "should I cache my modifier chain for perf?"
+
+## When NOT to use this skill
+
+- The chain order is correct and the cause is elsewhere (wrong-phase state read, missing keys).
+- The custom modifier itself is the problem — see `/skills/modifiers/migrating-to-modifier-node`.
+
+## The mental model
+
+Read each chain top-to-bottom. Treat `Modifier.a().b().c()` as `a(b(c(content)))` — `a` wraps everything, `c` is closest to the content.
+
+**Order-sensitive modifiers:**
+
+| Modifier | The bounds it acts on |
+|---|---|
+| `padding` | Subtracts from available space **below** it (inner). Content is inset. |
+| `background` | Paints across bounds **at its position** in the chain. |
+| `clip` | Clips everything **below** it (inner). Anything above is unclipped. |
+| `clickable` | Hit area is the bounds **at its position** — above = included, below = not. |
+| `graphicsLayer` | Wraps everything **below** it in a render layer (alpha, transforms, clip all apply to the inner subtree). |
+
+## Patterns
+
+### background OUTSIDE vs INSIDE padding
+
+```kotlin
+// WRONG (when intent is "red card with 8dp internal padding")
+Box(Modifier.padding(8.dp).background(Color.Red)) { Content() }
+// WRONG because: padding shrinks bounds first; background paints across the smaller inner area.
+// The surrounding 8dp margin has no red.
+```
+
+```kotlin
+// RIGHT — red fills the full box; content is inset by 8dp
+Box(Modifier.background(Color.Red).padding(8.dp)) { Content() }
+```
+
+### clickable touch target — above padding = full target, below = visual area only
+
+```kotlin
+// WRONG — click area is smaller than the 48dp minimum touch target
+Box(
+    Modifier
+        .padding(8.dp)
+        .clickable { /* ... */ }
+        .size(32.dp)
+) { Icon() }
+// WRONG because: clickable is below padding; the 8dp ring is outside the hit area.
+```
+
+```kotlin
+// RIGHT — clickable above padding gives the full padded area as the touch target
+Box(
+    Modifier
+        .clickable { /* ... */ }
+        .padding(8.dp)
+        .size(32.dp)
+) { Icon() }
+```
+
+### clip before background — not after
+
+```kotlin
+// WRONG
+Box(
+    Modifier
+        .background(Color.Red)
+        .clip(RoundedCornerShape(12.dp))
+) { Content() }
+// WRONG because: background paints across the unclipped square bounds first; clip runs
+// after and clips the content but NOT the already-drawn background.
+```
+
+```kotlin
+// RIGHT — clip first, then background paints within the clipped shape
+Box(
+    Modifier
+        .clip(RoundedCornerShape(12.dp))
+        .background(Color.Red)
+) { Content() }
+```
+
+### graphicsLayer scope — wraps everything below it
+
+```kotlin
+// WRONG — intent is to fade only the Icon, not the Badge
+Box {
+    Icon(Modifier.graphicsLayer { alpha = 0.5f })
+    Badge()  // Badge is NOT inside graphicsLayer; it renders at full opacity
+}
+// This is actually correct — graphicsLayer only wraps the Icon's subtree.
+// The common mistake is the reverse: wrapping the parent Box, expecting only one child to fade.
+```
+
+```kotlin
+// RIGHT — parent graphicsLayer fades the whole Box including Badge
+Box(Modifier.graphicsLayer { alpha = 0.5f }) {
+    Icon()
+    Badge()
+}
+```
+
+### Do not hoist modifier chains for perf without measuring
+
+```kotlin
+// UNNECESSARY
+val modifier = remember { Modifier.fillMaxWidth().padding(16.dp) }
+// WRONG because: Compose already interns structurally-equal Modifier chains internally.
+// This remember adds allocations during the first composition with no profiled benefit.
+// Add such a remember ONLY after FrameTimingMetric proves the chain is hot.
+```
+
+## Mandatory rules
+
+- **MUST** place `clip` BEFORE `background` when both are in the same chain and corner rounding is intended.
+- **MUST** place `clickable` ABOVE `padding` when the padded area should be tappable (Material 48dp touch target).
+- **MUST** place `background` BEFORE `padding` when the background should cover the full visual box.
+- **MUST NOT** add `remember { Modifier.… }` hoisting without a `FrameTimingMetric` benchmark showing the unhoisted chain is actually hot.
+- **PREFERRED:** add a one-line comment on any non-obvious ordering when reviewing.
+
+## Verification
+
+- [ ] Click area matches the intended tap target (padded or non-padded) confirmed via Layout Inspector bounds overlay.
+- [ ] Background color covers the intended region — confirmed by visual inspection on device.
+- [ ] Corner radius applies to the background — clip is above background in the chain.
+- [ ] No `remember { Modifier.… }` without a co-located benchmark reference.
+
+<CardGroup cols={2}>
+  <Card title="Migrating to Modifier.Node" icon="puzzle-piece" href="/skills/modifiers/migrating-to-modifier-node">
+    Replace legacy composed {} factories with persistent nodes.
+  </Card>
+  <Card title="Deferring State Reads" icon="arrow-down" href="/skills/recomposition/deferring-state-reads">
+    Move hot state reads out of Composition phase using lambda modifiers.
+  </Card>
+</CardGroup>

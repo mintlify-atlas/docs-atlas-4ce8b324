@@ -1,0 +1,168 @@
+---
+title: "End-to-End Compose Performance Audit Orchestrator"
+description: "Orchestrate the Compose performance loop: capture release baselines, diagnose with compiler reports, apply one targeted fix at a time, verify with CI gates."
+---
+
+This is the highest-level entry point in the Compose Performance Skills library. When the symptom is broad — "the app feels sluggish," "scroll is rough everywhere," "we're kicking off a perf sprint" — enter here. The orchestrator does **not** replace the 25 focused skills; it sequences them through the Measure → Diagnose → Fix → Verify loop and produces a written audit report. Perf work without measurement is guessing. Do not skip Phase 1.
+
+## When to use this skill
+
+- The developer reports broad sluggishness with no specific surface.
+- A team is kicking off a performance sprint and wants a structured plan.
+- A pre-release perf gate is required before shipping.
+- The developer wants a written deliverable with Before/After numbers.
+
+## When NOT to use this skill
+
+- A specific symptom is already named (scroll jank in `LazyColumn`, `derivedStateOf` not firing). Go straight to the focused skill using the [INDEX](/introduction) symptom lookup.
+- The developer only wants to fix one issue and does not need a written report.
+- No release build is possible — resolve the build first; this audit **must** measure release.
+
+## Prerequisites
+
+- Project builds the release variant successfully.
+- At least one physical Android device for measurement.
+- A Macrobenchmark module, or willingness to add one.
+- Willingness to commit Baseline Profile and stability baseline files to the repo.
+- Kotlin 2.0.20+, AGP 8.2+.
+
+## The four-phase loop
+
+<Steps>
+  <Step title="Phase 1 — Measure (establish baseline numbers BEFORE changing any code)">
+    Confirm the release variant builds and R8 is configured correctly (see `/skills/build/configuring-r8-for-compose`). Then capture:
+
+    **Cold startup** with `MacrobenchmarkRule` + `StartupTimingMetric` under `CompilationMode.Partial(BaselineProfileMode.Require)`, ≥10 iterations:
+
+    ```kotlin
+    @Test fun coldStartup() = rule.measureRepeated(
+        packageName = "com.example",
+        metrics = listOf(StartupTimingMetric()),
+        iterations = 10,
+        startupMode = StartupMode.COLD,
+        compilationMode = CompilationMode.Partial(BaselineProfileMode.Require),
+    ) {
+        pressHome()
+        startActivityAndWait()
+    }
+    ```
+
+    **Scroll frame timing** with `FrameTimingMetric`, ≥5 iterations:
+
+    ```kotlin
+    @Test fun feedScroll() = rule.measureRepeated(
+        packageName = "com.example",
+        metrics = listOf(FrameTimingMetric()),
+        iterations = 5,
+        compilationMode = CompilationMode.Partial(BaselineProfileMode.Require),
+    ) {
+        startActivityAndWait()
+        device.findObject(By.res("snack_feed")).fling(Direction.DOWN)
+    }
+    ```
+
+    Record all numbers in the audit report's **Baseline** section before any code change.
+  </Step>
+  <Step title="Phase 2 — Diagnose (turn symptoms into named causes)">
+    Enable Compose Compiler reports for the release variant. Read `<module>-composables.txt` and `<module>-classes.txt`. List:
+
+    - Every `restartable` but not `skippable` composable and the unstable parameter blocking it.
+    - Every unstable class with the offending field.
+
+    Use Layout Inspector with recomposition counts and skip counts on debug. For release-grade tracing, instrument top hotspots with `@TraceRecomposition` (see `/skills/measurement/tracing-recompositions-at-runtime`).
+
+    **Triage by frequency × cost.** A recomposition in a hot `LazyColumn` row beats a 10× recomposition on a one-off settings screen. Do not rank by compiler-report severity alone.
+
+    Produce a **Diagnosis section** in the audit report: top-5 hotspots, count of restartable-not-skippable composables, count of unstable classes, count of phase-misplaced state reads.
+  </Step>
+  <Step title="Phase 3 — Fix (one cause per PR, re-measure after each)">
+    For each ranked issue, pick the matching focused skill. After **each** fix, re-run Phase 1 (measure) and Phase 2 (diagnose) to confirm the change moved the needle and did not regress another surface.
+
+    | Cause | Skill |
+    |---|---|
+    | Unstable `data class`, `List`/`Map` parameter | `/skills/stability/stabilizing-compose-types` |
+    | Strong Skipping lambda capture issues | `/skills/recomposition/using-strong-skipping-correctly` |
+    | Animation/scroll state read in Composition | `/skills/recomposition/deferring-state-reads` |
+    | `derivedStateOf` misuse | `/skills/recomposition/choosing-derivedstateof` |
+    | Missing `key`/`contentType` in lazy layouts | `/skills/lists/optimizing-lazy-layouts` |
+    | Prefetch drops at high scroll velocity | `/skills/lists/configuring-lazy-prefetch` |
+    | `Modifier.composed {}` in custom modifiers | `/skills/modifiers/migrating-to-modifier-node` |
+    | `collectAsState()` background drain | `/skills/side-effects/collecting-flows-safely` |
+    | `BoxWithConstraints` inside LazyColumn | `/skills/recomposition/avoiding-subcomposition-pitfalls` |
+  </Step>
+  <Step title="Phase 4 — Verify (lock in gains, prevent regressions)">
+    Regenerate the Baseline Profile after all fixes are merged:
+
+    ```bash
+    ./gradlew :app:generateBaselineProfile
+    ```
+
+    Commit the updated `baseline-prof.txt`. Then add the CI stability gate (see `/skills/stability/enforcing-stability-in-ci`):
+
+    ```bash
+    ./gradlew :app:stabilityCheck
+    ```
+
+    Commit the stability baseline file. Any future PR that introduces a new unstable composable will fail CI before it merges.
+
+    Run the final Macrobenchmark numbers and write the **After** section of the audit report. Include device model, build type (`release` + R8), and a Before/After table.
+  </Step>
+</Steps>
+
+## Audit report template
+
+```markdown
+# Compose Performance Audit — [Screen/Module] — [Date]
+
+## Device
+- Model: [e.g. Pixel 6a]
+- Build type: release + R8 full mode
+
+## Phase 1 — Baseline numbers
+| Metric | Before |
+|---|---|
+| Cold startup `timeToInitialDisplayMs` p50 | |
+| Cold startup `timeToFullDisplayMs` p50 | |
+| Scroll `frameDurationCpuMs` p95 | |
+| Scroll `frameDurationCpuMs` p99 | |
+
+## Phase 2 — Diagnosis
+- Restartable-but-not-skippable composables: N
+- Unstable classes: N
+- Phase-misplaced state reads: N
+- Top-5 hotspots (ranked by frequency × cost):
+  1. ...
+
+## Phase 3 — Fixes applied
+| Fix | Skill | Δ p99 frame |
+|---|---|---|
+| ... | ... | ... |
+
+## Phase 4 — After numbers
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| Cold startup p50 | | | |
+| Scroll p95 | | | |
+| Scroll p99 | | | |
+
+## Regression gates added
+- [ ] `stabilityCheck` CI task added and baseline committed.
+- [ ] Baseline Profile regenerated and committed.
+```
+
+## Mandatory rules
+
+- **MUST** complete Phase 1 (measure baseline numbers) before changing any code.
+- **MUST** run on a release + R8 build on a real device. Debug numbers are not valid.
+- **MUST** re-measure after each Phase 3 fix — do not batch all fixes and measure once.
+- **MUST NOT** chase 100% skippability as a KPI. The goal is `FrameTimingMetric` and `StartupTimingMetric` improvement.
+- **PREFERRED:** one PR per fix so each change is bisectable and reviewable.
+
+<CardGroup cols={2}>
+  <Card title="Performance Loop Overview" icon="arrows-spin" href="/performance-loop/overview">
+    The Measure → Diagnose → Fix → Verify loop explained.
+  </Card>
+  <Card title="Symptom Index" icon="list" href="/introduction">
+    Jump directly to the skill for a specific symptom.
+  </Card>
+</CardGroup>

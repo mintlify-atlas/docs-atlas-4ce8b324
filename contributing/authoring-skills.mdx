@@ -1,0 +1,218 @@
+---
+title: "Authoring new skills for Compose Performance"
+description: "Contribute a SKILL.md: pick a category and gerund slug, write frontmatter and body, pass the post-write self-check, then add to INDEX.md and open a PR."
+---
+
+Every skill in this library is a focused, agent-readable Markdown file that teaches an AI assistant exactly one Compose performance fix. Before writing a line, read [`docs/SPEC.md`](https://github.com/skydoves/compose-performance-skills/blob/main/docs/SPEC.md) end to end — the frontmatter template, body structure, voice rules, and mandatory rules are not negotiable. Then read two or three existing `SKILL.md` files in the category closest to your contribution so you can match the established voice and RIGHT/WRONG conventions. This guide walks you through the full contribution workflow from directory setup to the final self-check.
+
+## Directory layout
+
+Skills live in a two-level path: `<category>/<slug>/SKILL.md`. The category is lowercase and singular where natural (`stability`, `recomposition`, `modifiers`). An optional `references/` directory sits one level deep inside the slug folder — never deeper, because previewing deep files truncates content.
+
+```bash
+compose-performance-skills/
+├── README.md
+├── INDEX.md
+├── LICENSE
+└── <category>/<slug>/
+    ├── SKILL.md
+    └── references/
+        └── <topic>.md
+```
+
+<Note>
+  New top-level categories require a separate proposal. Open an issue before
+  creating a category that does not already exist.
+</Note>
+
+## Slug naming rules
+
+A slug identifies the skill inside the repo and must match the `name` field in the frontmatter exactly. Follow these rules:
+
+- **Gerund form** — start with a verb ending in `-ing`: `diagnosing-compose-stability`, `migrating-to-modifier-node`.
+- **Lowercase and hyphenated** — no underscores, no camelCase, no uppercase letters.
+- **Max 64 characters** — count the entire slug string including hyphens.
+- **No reserved words** — slugs must not contain `anthropic` or `claude`.
+
+## Contribution workflow
+
+<Steps>
+  <Step title="Choose a category and slug">
+    Pick a category that already exists in the repository. Derive a slug in
+    gerund form that names the specific performance concern the skill addresses
+    (e.g., `avoiding-unstable-flow-parameters`). Keep it under 64 characters.
+  </Step>
+  <Step title="Create the directory and file">
+    Create `<category>/<slug>/SKILL.md`. If the skill body will reference
+    supplementary deep-dives, also create `<category>/<slug>/references/` now.
+    Do not create any other files at this stage.
+
+    ```bash
+    mkdir -p recomposition/avoiding-unstable-flow-parameters
+    touch recomposition/avoiding-unstable-flow-parameters/SKILL.md
+    ```
+  </Step>
+  <Step title="Fill the frontmatter">
+    Copy the frontmatter template from the [skill specification](/contributing/skill-spec)
+    and fill every field. The `description` field is what triggers the skill at
+    inference time — write it carefully: third person, verb-led, trigger-rich,
+    under 1024 characters. Include vocabulary variants the user would naturally
+    say (`jank`, `dropped frames`, `recomposition count`).
+
+    ```yaml
+    ---
+    name: avoiding-unstable-flow-parameters
+    description: >
+      Use this skill to eliminate recompositions caused by passing Flow or
+      StateFlow objects directly as composable parameters. Applies when the
+      developer observes unexpected recompositions, sees Flow listed as unstable
+      in the Compose compiler report, or asks why collecting a flow inside a
+      composable triggers full subtree recomposition. If the user mentions
+      flow parameter, unstable lambda, or collectAsState inside a composable,
+      use this skill.
+    license: Apache-2.0. See LICENSE for complete terms.
+    metadata:
+      author: Jaewoong Eum (skydoves)
+      keywords:
+        - jetpack-compose
+        - performance
+        - flow
+        - stability
+        - recomposition
+        - stateflow
+        - collectAsStateWithLifecycle
+    ---
+    ```
+  </Step>
+  <Step title="Write the body">
+    Follow the section order defined in the [skill specification](/contributing/skill-spec):
+    orientation paragraph, When to use, When NOT to use, Prerequisites,
+    Workflow, Patterns, Mandatory rules, Verification, References. Keep the
+    body under 500 lines. Overflow goes into `references/<topic>.md`.
+
+    Every code-level skill **MUST** include at least one RIGHT/WRONG paired
+    snippet. Every skill **MUST** close with a Verification checklist.
+  </Step>
+  <Step title="Update INDEX.md">
+    Open `INDEX.md` and add the new slug to the symptom table and the relevant
+    workflow phase section. If your skill addresses a specific API, add it to
+    the API table as well. A skill that is not indexed is effectively invisible
+    to users who navigate by symptom.
+  </Step>
+  <Step title="Run the post-write self-check">
+    Work through the self-check below before opening a pull request. Every item
+    must pass; the SPEC §9 checklist is the merge gate.
+  </Step>
+</Steps>
+
+## What is forbidden
+
+The following patterns are hard failures during review. A PR containing any of them will be sent back without merge.
+
+<AccordionGroup>
+  <Accordion title="First person and second person directed at the reader">
+    Never use `I`, `we`, `let me`, or `let's` anywhere in the skill body. Never
+    address the AI agent with `you can` or `you should` — use the imperative
+    instead. The only place where `author` appears in first person is the
+    `metadata.author` frontmatter field.
+
+    **Forbidden:** "I recommend wrapping your ViewModel call here."
+
+    **Correct:** "Wrap the ViewModel call at the call site."
+  </Accordion>
+  <Accordion title="Emojis and filler phrases">
+    No emojis anywhere in `SKILL.md` or `references/*.md`. No filler openers
+    (`Let's dive in!`, `Great question`, `Sure!`). No apologies or hedges
+    (`This might not work in all cases but…`). Write like a precise technical
+    specification, not a blog post.
+  </Accordion>
+  <Accordion title="Recommending composed {}">
+    **MUST NOT** recommend `composed { }` for new custom modifiers. The
+    `composed { }` factory is a legacy API and produces a restartable-but-not-skippable
+    node for every modifier instance. Always recommend the `Modifier.Node` API
+    instead. This rule comes directly from skydoves' editorial directives — see
+    the [skill specification](/contributing/skill-spec) for the full list.
+  </Accordion>
+  <Accordion title="Time-sensitive phrasing">
+    Never write `as of March 2026`, `recently added`, `in the latest release`,
+    or any phrase that becomes stale. Version-specific information belongs in a
+    clearly labeled sub-section, for example `### Compose ≥1.9`. API existence
+    claims **MUST** be backed by a doc URL.
+  </Accordion>
+  <Accordion title="Duplicate content between skills">
+    **MUST NOT** copy prose or code from one skill to another. If two skills
+    share a concept, the secondary skill cross-references the primary with a
+    relative Markdown link. Duplication creates drift: two copies of the same
+    claim eventually contradict each other.
+  </Accordion>
+  <Accordion title="XML tags in skill content">
+    No XML or HTML tags in `SKILL.md` bodies. The reader is an LLM that
+    processes Markdown — XML tags interfere with prompt parsing and are not
+    part of the spec format.
+  </Accordion>
+</AccordionGroup>
+
+## Voice rules
+
+Skills are written **for an AI agent**, not for a human developer. The agent reads the skill and then acts on its instructions, so clarity of instruction matters more than readability for humans.
+
+- Use **imperative second person** for instructions directed at the agent: `Run ./gradlew assembleRelease`, `Replace List<Foo> with ImmutableList<Foo>`.
+- Use **third person** when referring to the developer the agent is helping: `the developer`, `the user`.
+- Use `MUST`, `MUST NOT`, `DO NOT`, and `PREFERRED` in bold caps for hard rules.
+- Use paired `WRONG` / `RIGHT` code blocks with a one-line `WRONG because:` rationale for every code-level pattern.
+
+## Post-write self-check
+
+Work through every item before opening a pull request. The SPEC §9 checklist is the merge gate — reviewers verify each item, not just the diff.
+
+<AccordionGroup>
+  <Accordion title="Frontmatter validation">
+    - `name` matches the folder slug exactly (case-sensitive).
+    - `description` is 1024 characters or fewer.
+    - `description` is third person, verb-led, and contains ≥3 trigger vocabulary variants.
+    - `license` line is present: `Apache-2.0. See LICENSE for complete terms.`
+    - `keywords` has ≥4 entries including both symptoms and API names.
+    - No reserved words (`anthropic`, `claude`) in the skill name.
+  </Accordion>
+  <Accordion title="Body structure and length">
+    - Body is ≤500 lines. Count with `wc -l SKILL.md`.
+    - Section order matches the spec: orientation → When to use → When NOT to use → Prerequisites → Workflow → Patterns → Mandatory rules → Verification → References.
+    - All `MUST` and `MUST NOT` directives appear in **bold caps**.
+  </Accordion>
+  <Accordion title="Code quality">
+    - At least one RIGHT/WRONG snippet pair for any code-level skill.
+    - Every WRONG snippet has a one-line `WRONG because:` rationale.
+    - RIGHT snippets compile — no `...` ellipses in the critical lines.
+    - No `composed { }` usage recommended anywhere.
+  </Accordion>
+  <Accordion title="References and citations">
+    - At least 3 authoritative reference URLs (Android Developers, Compose compiler source, Ben Trengrove, Chris Banes, skydoves blog).
+    - Cross-references to sibling skills use relative Markdown links — never URLs.
+    - No dead links (verify manually or with `mint broken-links` if the docs site is running).
+  </Accordion>
+  <Accordion title="Voice and tone">
+    - No emojis, no first person (`I`, `we`, `let me`), no filler phrases.
+    - No time-sensitive phrasing (`as of`, `recently`, `latest`).
+    - No XML tags in the body.
+    - At least one of the six skydoves editorial directives is surfaced where applicable — see the [skill specification](/contributing/skill-spec) for the full list.
+  </Accordion>
+  <Accordion title="Index updated">
+    - `INDEX.md` symptom table includes the new slug.
+    - `INDEX.md` workflow phase section includes the new slug.
+    - API table updated if the skill addresses a specific API.
+  </Accordion>
+</AccordionGroup>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Skill specification" href="/contributing/skill-spec" icon="file-text">
+    Complete reference for the SKILL.md format: frontmatter template, body
+    section order, voice rules, RIGHT/WRONG quality bar, and all mandatory
+    author rules.
+  </Card>
+  <Card title="Introduction" href="/introduction" icon="book-open">
+    Overview of the compose-performance-skills library, its design philosophy,
+    and how the skills are consumed by AI agents.
+  </Card>
+</CardGroup>

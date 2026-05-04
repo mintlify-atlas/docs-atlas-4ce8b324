@@ -1,0 +1,226 @@
+---
+title: "Understanding Compose Stability Inference in Depth"
+description: "Decode the 12-phase Compose compiler algorithm to predict why a type is classified Certain, Runtime, Unknown, Parameter, or Combined before reports run."
+---
+
+Stability is decided by a 12-phase algorithm baked into the Compose compiler. When a report shows `runtime stable` for a class that "looks fine", or when a recursive tree is unexpectedly `unstable`, the answer is in the algorithm — not in the code structure alone. This skill teaches you how each phase works, what the five stability types mean, and how the generic bitmask encoding propagates stability through type arguments. Pair it with [Diagnosing Compose Stability](/skills/stability/diagnosing-compose-stability) to generate the report and [Stabilizing Compose Types](/skills/stability/stabilizing-compose-types) to apply fixes.
+
+## When to use this skill
+
+- A report shows `runtime`, `unknown`, or `unstable` for a class that "looks fine"
+- You need to explain why `Box<String>` shows `runtime stable` instead of just `stable`
+- Generics are involved: `Box<T>`, `Wrapper<A, B>`, `Pair<String, Int>`, `ImmutableList<User>`
+- The class lives in another module and ships as a compiled artifact
+- Someone asks about the `$stable: Int` field, `@StabilityInferred`, or cross-module classification
+- A self-referential type like `class Node(val children: List<Node>)` is unexpectedly unstable
+- You want to predict the compiler's verdict before generating the report
+
+## Prerequisites
+
+- Compose Compiler reports already generated, or at least one `<module>-classes.txt` and `<module>-composables.txt` available in `build/compose_compiler/`
+- Familiarity with the basic stability vocabulary: `stable`, `unstable`, `skippable`, `restartable`, `@Stable`, `@Immutable`
+- Kotlin 2.0+ with the Compose compiler plugin; Strong Skipping is on by default
+
+## Workflow
+
+Walk the type through the same 12 phases the compiler does. The first matching phase wins.
+
+<Steps>
+  <Step title="Phase 1 — primitive / String / function / Unit fast path → Stable">
+    The compiler returns immediately with `Stability.Certain(stable = true)`. No field analysis runs. Mention this fast path so the developer knows nothing else was inspected for primitives, `String`, `Unit`, and function types.
+  </Step>
+
+  <Step title="Phase 2 — type parameter substitution → Parameter">
+    A bare type variable `T` becomes `Stability.Parameter(T)`. Resolution is deferred to the call site that substitutes the type argument.
+  </Step>
+
+  <Step title="Phase 3 — nullable unwrap">
+    Nullability does not change stability. `Int?` → analyze `Int`. The `?` is stripped and the algorithm recurses.
+  </Step>
+
+  <Step title="Phase 4 — inline class — check underlying type">
+    `value class Wrapper(val raw: T)` is exactly as stable as `T`. The algorithm recurses on the underlying type.
+  </Step>
+
+  <Step title="Phase 5 — cycle detection → conservative Unstable">
+    If the type is already on the visited stack, the algorithm returns `Certain(stable = false)` to guarantee termination. The escape hatch is `@Stable`/`@Immutable` on the recursive class — phase 6 fires before phase 5 is reached.
+  </Step>
+
+  <Step title="Phase 6 — annotation check → Certain(stable = true)">
+    `@Stable`, `@Immutable`, or any `@StableMarker`-annotated annotation → `Stability.Certain`. `@Immutable` additionally enables static expression promotion — the compiler may hoist reads of properties to static expressions and elide equality checks. `@Stable` only promises change notification.
+  </Step>
+
+  <Step title="Phase 7 — Known Stable Constructs registry">
+    A hard-coded registry of well-known types returns a bitmask. Examples:
+
+    | Type | Bitmask | Reading |
+    |---|---|---|
+    | `kotlin.Pair<A, B>` | `0b11` | both A and B affect stability |
+    | `kotlin.Triple<A, B, C>` | `0b111` | all three affect stability |
+    | `kotlinx.collections.immutable.ImmutableList<E>` | `0b1` | only E affects stability |
+    | `java.math.BigInteger` | `0b0` | no parameters; always stable |
+  </Step>
+
+  <Step title="Phase 8 — stability_config.conf match → Parameter with config bitmask">
+    If the type matches an entry in `stability_config.conf`, the compiler returns `Stability.Parameter` with the bitmask declared for that entry. This is the fix path for third-party and Java types.
+  </Step>
+
+  <Step title="Phase 9 — external module → Runtime">
+    If the class is from a separately compiled module, the compiler reads the `@StabilityInferred(parameters = ...)` annotation it generated during that module's build and returns `Stability.Runtime`. At runtime, the `$stable: Int` field on the class is ANDed against the actual type-argument stabilities.
+
+    <Note>
+      `runtime stable` is **not a bug**. It means "I cannot prove this at compile time, so I will check at runtime via the `$stable: Int` field." The check is one `Int` field load and a bitwise AND — far cheaper than an unskipped recomposition.
+    </Note>
+  </Step>
+
+  <Step title="Phase 10 — Java type → Unstable by default">
+    Java `final` fields look like `var` to the inference because the algorithm has no Kotlin metadata. The verdict is `Certain(stable = false)`. The fix is a `stability_config.conf` entry — not editing the Java source.
+  </Step>
+
+  <Step title="Phase 11 — interface or abstract class → Unknown">
+    The compiler cannot enumerate implementations. The runtime falls back to identity (`===`) for the equality probe. `kotlin.collections.List`, `Set`, and `Map` are `Unknown` interfaces — not `Unstable`. The distinction matters: `Unknown` means "cannot tell", `Unstable` means "proven unstable".
+  </Step>
+
+  <Step title="Phase 12 — field-by-field analysis">
+    The slow path walks the **linearized class hierarchy** so inherited fields participate. Any `var` property → `Unstable` immediately. Any field whose type is `Unstable` → `Unstable` (Combined dominates). Otherwise the class is `Stable` (Combined of all-stable fields collapses to Stable).
+  </Step>
+</Steps>
+
+## Patterns
+
+### Why `Box<String>` shows as `runtime stable`
+
+```kotlin
+// Source — in a library module
+class Box<T>(val value: T)
+
+// Call site — in the app module
+@Composable fun BoxRow(box: Box<String>) { Text(box.value) }
+```
+
+The compiler walks `Box<T>`:
+
+1. Phase 12 finds one field `value: T` — recursion on `T` hits phase 2 → `Stability.Parameter`, bitmask `0b1`
+2. `Box` is consumed from a different module, so the compiler emits `@StabilityInferred(parameters = 0b1)` and a `$stable: Int` field. Downstream call sites pick this up via phase 9
+3. At the call site, `T = String` → `String` is `Certain(stable = true)` → bit 0 satisfied
+4. `BoxRow` is `skippable`
+
+<Tabs>
+  <Tab title="Wrong mental model">
+    ```kotlin
+    // "runtime stable means there is a meaningful runtime cost on every recomposition"
+    // Wrong: the cost is one Int field load and a bitwise AND, performed once when the
+    // runtime computes the call-site stability. Far cheaper than the skipped recomposition.
+    ```
+  </Tab>
+  <Tab title="Right mental model">
+    ```kotlin
+    // runtime stable = "compiler proved stability conditional on the type arguments, and
+    // emitted a $stable: Int field whose bits the runtime ANDs against the substituted
+    // argument stabilities". The skip decision is still made; it is made at runtime.
+    ```
+  </Tab>
+</Tabs>
+
+### Why `@Immutable` enables more optimizations than `@Stable`
+
+`@Stable` is a contract: "I will notify Compose of changes." `@Immutable` is stronger: "I will never change." With `@Immutable` the compiler may promote reads to static expressions and elide equality probes for nested usages.
+
+<Tabs>
+  <Tab title="Wrong">
+    ```kotlin
+    @Stable data class Coordinates(val lat: Double, val lng: Double)
+    ```
+    `Coordinates` never mutates after construction. `@Stable` understates the contract and forfeits static-expression promotion at every read site.
+  </Tab>
+  <Tab title="Right">
+    ```kotlin
+    @Immutable data class Coordinates(val lat: Double, val lng: Double)
+    ```
+  </Tab>
+</Tabs>
+
+### Why a recursive tree is unstable even though it looks fine
+
+```kotlin
+data class Node(val id: String, val children: List<Node>)
+```
+
+Phase 5 (cycle detection) bails. The compiler does not attempt fixed-point analysis. Even if every field is otherwise stable, the conservative verdict is `Unstable`.
+
+<Tabs>
+  <Tab title="Wrong">
+    ```kotlin
+    @Stable data class Node(val id: String, val children: List<Node>)
+    ```
+    `List<Node>` is a mutable interface in practice. The `@Stable` annotation tells the compiler to trust the developer, but the actual `List` can mutate between recompositions without notifying Compose — producing silent missed recompositions.
+  </Tab>
+  <Tab title="Right">
+    ```kotlin
+    import kotlinx.collections.immutable.ImmutableList
+
+    @Immutable data class Node(val id: String, val children: ImmutableList<Node>)
+    ```
+    `ImmutableList` is in the Known Stable Constructs registry (phase 7) with bitmask `0b1`. Phase 7 fires before phase 5 is reached for the collection type, breaking the cycle.
+  </Tab>
+</Tabs>
+
+### Why `Set<String>` blocks skipping but `ImmutableSet<String>` doesn't
+
+`kotlin.collections.Set` is an interface → phase 11 → `Unknown`. `kotlinx.collections.immutable.ImmutableSet` is in the registry with bitmask `0b1` → phase 7 → `Stability.Parameter`, resolves stable when the element type is stable.
+
+<Tabs>
+  <Tab title="Wrong">
+    ```kotlin
+    @Composable fun TagRow(tags: Set<String>) { /* ... */ }
+    ```
+    `Set` is an interface — phase 11 returns `Unknown`. The call site is non-skippable.
+  </Tab>
+  <Tab title="Right">
+    ```kotlin
+    @Composable fun TagRow(tags: ImmutableSet<String>) { /* ... */ }
+    ```
+  </Tab>
+</Tabs>
+
+## Five compiler-level stability types
+
+| Type | Meaning |
+|---|---|
+| `Stability.Certain` | Primitives, `String`, `Unit`, function types, enums, `@Stable`/`@Immutable` classes. Decision is final at compile time. |
+| `Stability.Runtime` | Separately compiled class. Compiler emits `@StabilityInferred` and a `$stable: Int` field; runtime ANDs the bits against actual type arguments. |
+| `Stability.Unknown` | Interface, abstract class, or anything the compiler won't commit on. Runtime falls back to `===` for the equality probe. |
+| `Stability.Parameter` | Generic. Stability is a function of the type arguments via a bitmask. |
+| `Stability.Combined` | Aggregate of multiple components. **Unstable dominates** — any single `Unstable` component poisons the whole. |
+
+## Mandatory rules
+
+- **MUST** explain that `runtime stable` is not a bug — it is the compiler's deferred stability check via the `$stable: Int` field
+- **MUST NOT** suggest structural changes before explaining *why* the current structure produces the verdict — diagnosis before treatment
+- **MUST** distinguish `Stability.Unknown` from `Stability.Unstable` — `Unknown` means "cannot tell" and falls back to identity equality; `Unstable` means "proven unstable" and disables skipping
+- **MUST NOT** recommend `@Stable` on a type whose mutation contract cannot be guaranteed — a broken contract produces silent missed recompositions
+
+## Verification
+
+- [ ] You can predict, before running the report, whether a candidate type will be `Certain`, `Runtime`, `Unknown`, `Parameter`, or `Combined`
+- [ ] You can name which of the 12 phases produced the verdict for any given type
+- [ ] For a `runtime stable` class, you can explain the `@StabilityInferred(parameters = ...)` annotation and the `$stable: Int` field
+- [ ] You can correctly identify `Set<T>`, `List<T>`, `Map<K, V>` as `Unknown` interfaces — not `Unstable` — when explaining why they block skipping
+- [ ] You refuse to recommend `@Stable` or `@Immutable` on a type whose mutation contract is not guaranteed
+
+## Related skills
+
+<CardGroup cols={2}>
+  <Card title="Diagnosing Compose Stability" href="/skills/stability/diagnosing-compose-stability">
+    Generate the compiler reports that this skill explains.
+  </Card>
+  <Card title="Stabilizing Compose Types" href="/skills/stability/stabilizing-compose-types">
+    Apply fixes once you understand why the compiler made its classification.
+  </Card>
+  <Card title="Enforcing Stability in CI" href="/skills/stability/enforcing-stability-in-ci">
+    Gate PRs so newly introduced inference surprises fail the build.
+  </Card>
+  <Card title="Using the Stability Analyzer IDE Plugin" href="/skills/stability/using-stability-analyzer-ide-plugin">
+    See the same inference results live in the editor as you type.
+  </Card>
+</CardGroup>

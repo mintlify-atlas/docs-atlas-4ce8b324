@@ -1,133 +1,87 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "Compose Performance Skills: Agent Skills for Compose"
+description: "26 agent skills teaching AI coding agents to fix Jetpack Compose performance: stability, recomposition, lazy layouts, modifiers, side effects, and hot reload."
 ---
 
-## Setting up
+Compose Performance Skills is a community library of Agent Skills built for Jetpack Compose performance work. Each skill is a focused `SKILL.md` file that an AI agent loads on demand to diagnose and fix a specific performance problem — from scroll jank and stability regressions to hot reload setup and CI enforcement. The library covers the full performance loop: Measure, Diagnose, Fix, and Verify.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install the skills into Claude Code, Android Studio Agent, or any compatible agent runtime in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="How Skills Work" icon="book-open" href="/how-skills-work">
+    Understand the SKILL.md format, frontmatter triggers, and how agents load and chain skills.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Performance Loop" icon="arrows-spin" href="/performance-loop/overview">
+    Follow the Measure → Diagnose → Fix → Verify loop that every skill is aligned to.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Skills Reference" icon="list" href="/skills/stability/diagnosing-compose-stability">
+    Browse all 26 skills organized by category: Stability, Recomposition, Lists, Modifiers, and more.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What's included
 
-Everything you need to create world-class documentation.
+The library ships 26 skills across nine categories, all grounded in primary sources from Android Developers, the Compose compiler, and the [skydoves](https://github.com/skydoves) open source ecosystem.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="Stability" icon="shield-check" href="/skills/stability/diagnosing-compose-stability">
+    Diagnose compiler reports, stabilize types, enforce stability in CI, and use the IDE analyzer plugin.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Recomposition" icon="rotate" href="/skills/recomposition/debugging-recompositions">
+    Eliminate unnecessary recompositions with state deferral, `derivedStateOf`, strong skipping, and subcomposition fixes.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Lists" icon="list-ul" href="/skills/lists/optimizing-lazy-layouts">
+    Make `LazyColumn` and `LazyVerticalGrid` smooth with stable keys, `contentType`, and prefetch tuning.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Modifiers" icon="puzzle-piece" href="/skills/modifiers/migrating-to-modifier-node">
+    Author and migrate custom modifiers to `Modifier.Node` and fix modifier chain ordering bugs.
   </Card>
-</Columns>
+  <Card title="Side Effects" icon="bolt" href="/skills/side-effects/collecting-flows-safely">
+    Wire flows and effects safely with `collectAsStateWithLifecycle` and correct `LaunchedEffect` keys.
+  </Card>
+  <Card title="Measurement" icon="chart-line" href="/skills/measurement/generating-baseline-profiles">
+    Establish baselines with Macrobenchmark, generate Baseline Profiles, and always measure in release mode.
+  </Card>
+  <Card title="Build" icon="hammer" href="/skills/build/configuring-r8-for-compose">
+    Configure R8 full mode and strong skipping to unlock the runtime performance the compiler assumes.
+  </Card>
+  <Card title="Hot Reload" icon="fire" href="/skills/hot-reload/setting-up-compose-hotswan">
+    Install Compose HotSwan, understand reload limits, preserve state, and drive the loop from an AI agent via MCP.
+  </Card>
+  <Card title="Audit" icon="magnifying-glass" href="/skills/audit/auditing-compose-performance">
+    Run an end-to-end performance audit that chains Measure → Diagnose → Fix → Verify automatically.
+  </Card>
+</CardGroup>
 
-## Make your content agent ready
+## Get started
 
-Make your docs work for humans and AI agents alike.
+<Steps>
+  <Step title="Clone the repository">
+    Clone compose-performance-skills to a stable location on your machine.
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
+    ```bash
+    git clone https://github.com/skydoves/compose-performance-skills.git \
+      ~/.claude/skills-sources/compose-performance-skills
+    ```
+  </Step>
+  <Step title="Run the install script">
+    The install script symlinks each skill into the flat layout your agent runtime expects.
 
-## Need inspiration?
+    ```bash
+    ~/.claude/skills-sources/compose-performance-skills/scripts/install-skills.sh
+    ```
+  </Step>
+  <Step title="Restart your agent">
+    Restart Claude Code (or your agent runtime). The skills are now active and will load automatically when you describe a Compose performance symptom.
+  </Step>
+  <Step title="Describe a symptom">
+    Mention a Compose performance problem in your prompt. The agent matches trigger vocabulary from skill frontmatter and loads the relevant `SKILL.md` automatically.
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    > "My LazyColumn drops frames during fast scroll. Recomposition counts spike on every scroll tick."
+  </Step>
+</Steps>
+
+<Note>
+  The install script is idempotent. Run it again after a `git pull` to pick up new skills without creating duplicate symlinks.
+</Note>
